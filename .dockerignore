@@ -1,0 +1,46 @@
+# Keep the backend build context small and free of secrets / cruft.
+
+# Secrets and local env
+.env
+*.env
+!.env.example
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.hypothesis/
+build/
+dist/
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Version control / editor / project meta
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# Spec / steering docs (not needed in the image)
+.kiro/
+
+# Frontend (built in its own image, not the backend context)
+frontend/
+
+# Docker / compose files themselves
+Dockerfile
+.dockerignore
+compose*.yml
+docker-compose*.yml
+
+# Tests and docs not needed at runtime
+tests/
+docs/
+*.md
+!README.md

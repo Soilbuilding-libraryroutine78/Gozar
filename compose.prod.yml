@@ -1,0 +1,114 @@
+# Production stack for Gozar.
+#   docker compose -f compose.prod.yml up -d --build
+#
+# Production differences vs. compose.yml:
+#   - no source bind mounts and no autoreload (uses the image's default command)
+#   - restart: always
+#   - postgres and redis are NOT published to the host (internal network only)
+#   - all secrets are REQUIRED and injected from the environment (fail closed via
+#     ${VAR:?...}); there are no insecure defaults
+#   - named volumes for durable data
+#
+# Start the complete production stack with:
+#   docker compose -f compose.prod.yml up -d --build
+
+name: gozar-prod
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: gozar-backend:latest
+    # Optional .env supplies non-critical, deployment-specific config such as
+    # GOZAR_PROVIDER_BASE_URLS / GOZAR_PROVIDER_MODELS / GOZAR_PROVIDER_OAUTH. The
+    # explicit `environment:` block below always takes precedence over the file, so
+    # the critical secrets and wiring stay strict and fail-closed.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GOZAR_APP_ENV: production
+      GOZAR_LOG_LEVEL: ${GOZAR_LOG_LEVEL:-info}
+      GOZAR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB}
+      GOZAR_REDIS_URL: redis://redis:6379/0
+      GOZAR_MASTER_KEY: ${GOZAR_MASTER_KEY:?set GOZAR_MASTER_KEY}
+      GOZAR_JWT_SECRET: ${GOZAR_JWT_SECRET:?set GOZAR_JWT_SECRET}
+      GOZAR_TOKEN_PEPPER: ${GOZAR_TOKEN_PEPPER:?set GOZAR_TOKEN_PEPPER}
+      GOZAR_HTTP_HOST: 0.0.0.0
+      GOZAR_HTTP_PORT: "8000"
+    # Bound to loopback only: the backend is reached through the reverse proxy
+    # (Nginx), never directly from the network. Change to "0.0.0.0:..." only if you
+    # intentionally want to expose it without a proxy in front.
+    ports:
+      - "127.0.0.1:${GOZAR_HTTP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    volumes:
+      - gozar_pg_data:/var/lib/postgresql/data
+    # Not published to the host; reachable only on the internal compose network.
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-bookworm
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - gozar_redis_data:/data
+    # Not published to the host; reachable only on the internal compose network.
+    restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: runtime
+    image: gozar-frontend:latest
+    # nginx serves the static SPA and reverse-proxies /api and /v1 to the backend
+    # service (see frontend/nginx.conf), so the SPA runs same-origin in production.
+    # Bound to loopback only: the host reverse proxy (Nginx) is the single public
+    # entrypoint. See deploy/nginx/ for the server-level reverse-proxy config.
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  gozar_pg_data:
+  gozar_redis_data:

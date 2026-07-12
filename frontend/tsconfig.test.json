@@ -1,0 +1,12 @@
+{
+  // Type-checking config for the component test suite. The production build
+  // (tsconfig.json) excludes test files so the runtime bundle stays clean; this
+  // config layers in the test files and the jsdom/vitest globals so editors and a
+  // dedicated `tsc -p tsconfig.test.json --noEmit` validate them under strict mode.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["src", "src/**/*.test.ts", "src/**/*.test.tsx", "src/test"],
+  "exclude": []
+}

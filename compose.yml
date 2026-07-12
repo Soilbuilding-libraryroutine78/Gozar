@@ -1,0 +1,112 @@
+# Development stack for Gozar (run with: docker compose up -d --build).
+#
+# Convenience defaults are used for the local Postgres/Redis credentials so the
+# stack comes up with no extra setup. Real secrets (master key, JWT secret,
+# token pepper) still come from a local .env file (copy from .env.example).
+#
+# Brings up backend + postgres + redis + frontend. The dev frontend is the Vite
+# dev server with hot reload; it proxies /api and /v1 to the backend service
+# (VITE_DEV_PROXY_TARGET) so the SPA runs same-origin without CORS.
+
+name: gozar
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: gozar-backend:dev
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GOZAR_APP_ENV: development
+      # Point the app at the in-network service hostnames (overrides .env).
+      GOZAR_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-gozar}:${POSTGRES_PASSWORD:-gozar}@postgres:5432/${POSTGRES_DB:-gozar}
+      GOZAR_REDIS_URL: redis://redis:6379/0
+      GOZAR_HTTP_HOST: 0.0.0.0
+      GOZAR_HTTP_PORT: "8000"
+    # Dev: hot reload on source changes.
+    command: ["sh", "-c", "uvicorn gozar.app:app --host 0.0.0.0 --port 8000 --reload"]
+    volumes:
+      # Bind-mount source for live reload (dev only).
+      - ./gozar:/app/gozar
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gozar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gozar}
+      POSTGRES_DB: ${POSTGRES_DB:-gozar}
+    volumes:
+      - gozar_pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gozar} -d ${POSTGRES_DB:-gozar}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-bookworm
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - gozar_redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+      target: dev
+    image: gozar-frontend:dev
+    environment:
+      # Dev SPA calls the backend via the Vite dev-server proxy (avoids CORS).
+      VITE_DEV_PROXY_TARGET: http://backend:8000
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    volumes:
+      # Bind-mount source for hot reload; keep the image's node_modules.
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      # node is always present in the dev image; avoids depending on wget/curl.
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5173/',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  gozar_pg_data:
+  gozar_redis_data:
