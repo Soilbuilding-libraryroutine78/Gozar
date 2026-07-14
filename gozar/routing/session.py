@@ -28,16 +28,19 @@ from redis.asyncio import Redis
 
 from gozar.core.config import Settings, get_settings
 from gozar.core.redis import get_redis
-from gozar.routing.chains import RoutingChain, RoutingTarget, evaluate_chain
+from gozar.routing.chains import RouteKind, RoutingChain, RoutingTarget, evaluate_chain
 from gozar.routing.state import CredentialState
 
 # Redis key namespace for the session-affinity map.
 _SESSION_KEY_PREFIX = "route:session:"
 
 
-def _session_key(session_id: str) -> str:
+def _session_key(session_id: str, route_kind: RouteKind) -> str:
     """Return the namespaced Redis key for a session's affinity binding."""
-    return f"{_SESSION_KEY_PREFIX}{session_id}"
+
+    if route_kind is RouteKind.CHAT:
+        return f"{_SESSION_KEY_PREFIX}{session_id}"
+    return f"{_SESSION_KEY_PREFIX}{route_kind.value}:{session_id}"
 
 
 async def record_session_binding(
@@ -46,6 +49,7 @@ async def record_session_binding(
     *,
     redis: Redis | None = None,
     settings: Settings | None = None,
+    route_kind: RouteKind = RouteKind.CHAT,
 ) -> None:
     """Bind ``session_id`` to ``account_id`` in the Redis session map.
 
@@ -62,7 +66,7 @@ async def record_session_binding(
     settings = settings or get_settings()
     client = redis or get_redis()
     await client.set(
-        _session_key(session_id),
+        _session_key(session_id, route_kind),
         str(account_id),
         ex=settings.session_affinity_ttl_seconds,
     )
@@ -72,6 +76,7 @@ async def get_session_binding(
     session_id: str | None,
     *,
     redis: Redis | None = None,
+    route_kind: RouteKind = RouteKind.CHAT,
 ) -> UUID | None:
     """Return the credential bound to ``session_id``, or ``None``.
 
@@ -81,7 +86,7 @@ async def get_session_binding(
     if not session_id:
         return None
     client = redis or get_redis()
-    raw = await client.get(_session_key(session_id))
+    raw = await client.get(_session_key(session_id, route_kind))
     if not raw:
         return None
     try:
@@ -97,6 +102,7 @@ async def get_attempt_order(
     session_id: str | None = None,
     *,
     redis: Redis | None = None,
+    route_kind: RouteKind = RouteKind.CHAT,
 ) -> list[RoutingTarget]:
     """Return the ordered list of credential ids to attempt for a request.
 
@@ -115,5 +121,9 @@ async def get_attempt_order(
     Returns:
         The ordered, available credential ids to attempt (possibly empty).
     """
-    session_pref = await get_session_binding(session_id, redis=redis)
+    session_pref = await get_session_binding(
+        session_id,
+        redis=redis,
+        route_kind=route_kind,
+    )
     return evaluate_chain(chain, states, session_pref)

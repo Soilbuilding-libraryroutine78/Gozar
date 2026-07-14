@@ -32,7 +32,7 @@ from gozar.analytics.service import (
     TokenCounts,
 )
 from gozar.providers.model_catalog import ProviderModelCatalogView
-from gozar.routing.chains import FallbackPolicy
+from gozar.routing.chains import FallbackPolicy, RouteKind
 from gozar.routing.service import ChainView
 from gozar.tokens.service import IssuedToken, TokenView
 from gozar.translation.types import OpenAIModelCard
@@ -344,6 +344,10 @@ class ChainEntryRequest(BaseModel):
         default=FallbackPolicy.ANY_ERROR,
         description="When a failed attempt may continue to the next chain node.",
     )
+    route: RouteKind = Field(
+        default=RouteKind.CHAT,
+        description="Request lane served by this node: chat or embeddings.",
+    )
 
 
 class CreateChainRequest(BaseModel):
@@ -414,6 +418,7 @@ class ChainEntryResponse(BaseModel):
     position: int
     model: str | None = None
     fallback_policy: FallbackPolicy = FallbackPolicy.ANY_ERROR
+    route: RouteKind = RouteKind.CHAT
 
 
 class ChainResponse(BaseModel):
@@ -438,6 +443,7 @@ class ChainResponse(BaseModel):
                     position=e.position,
                     model=e.model_id,
                     fallback_policy=e.fallback_policy,
+                    route=e.route_kind,
                 )
                 for e in view.entries
             ],
@@ -450,7 +456,7 @@ class ChainResponse(BaseModel):
 
 
 class ModelCatalogAccountResponse(BaseModel):
-    """Models reachable through one connected account."""
+    """Route-specific models reachable through one connected account."""
 
     account_id: uuid.UUID
     label: str
@@ -459,6 +465,8 @@ class ModelCatalogAccountResponse(BaseModel):
     status: str
     model_count: int
     models: list[OpenAIModelCard]
+    embedding_model_count: int = 0
+    embedding_models: list[OpenAIModelCard] = Field(default_factory=list)
 
 
 class ChainIssueResponse(BaseModel):
@@ -469,6 +477,7 @@ class ChainIssueResponse(BaseModel):
     position: int | None = None
     account_id: uuid.UUID | None = None
     model: str | None = None
+    route: RouteKind | None = None
 
 
 class ModelCatalogChainResponse(BaseModel):
@@ -478,8 +487,12 @@ class ModelCatalogChainResponse(BaseModel):
     name: str
     model_selector: str | None = None
     entry_count: int
+    chat_entry_count: int = 0
+    embedding_entry_count: int = 0
     model_count: int
     models: list[OpenAIModelCard]
+    embedding_model_count: int = 0
+    embedding_models: list[OpenAIModelCard] = Field(default_factory=list)
     health: str = "healthy"
     issues: list[ChainIssueResponse] = Field(default_factory=list)
 
@@ -521,6 +534,8 @@ class ModelCatalogResponse(BaseModel):
     refreshed: bool
     model_count: int
     models: list[OpenAIModelCard]
+    embedding_model_count: int = 0
+    embedding_models: list[OpenAIModelCard] = Field(default_factory=list)
     accounts: list[ModelCatalogAccountResponse]
     chains: list[ModelCatalogChainResponse]
     providers: list[ProviderModelCatalogResponse]

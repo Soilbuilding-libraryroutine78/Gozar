@@ -46,6 +46,13 @@ class FallbackPolicy(str, Enum):
     RETRYABLE = "retryable"
 
 
+class RouteKind(str, Enum):
+    """Request lane served by one ordered group of chain nodes."""
+
+    CHAT = "chat"
+    EMBEDDINGS = "embeddings"
+
+
 @dataclass(frozen=True)
 class RoutingTarget:
     """One provider attempt in a routing chain.
@@ -58,6 +65,7 @@ class RoutingTarget:
     account_id: UUID
     model_id: str | None = None
     fallback_policy: FallbackPolicy = FallbackPolicy.ANY_ERROR
+    route_kind: RouteKind = RouteKind.CHAT
     node_id: UUID | None = None
     position: int | None = None
 
@@ -98,6 +106,17 @@ class RoutingChain:
         """Return credential ids in attempt order for state snapshotting."""
 
         return tuple(entry.account_id for entry in self.entries)
+
+    def for_route(self, route_kind: RouteKind) -> "RoutingChain":
+        """Return this chain with only the nodes assigned to ``route_kind``."""
+
+        return RoutingChain(
+            entries=tuple(
+                entry for entry in self.entries if entry.route_kind is route_kind
+            ),
+            chain_id=self.chain_id,
+            model_selector=self.model_selector,
+        )
 
 
 def evaluate_chain(

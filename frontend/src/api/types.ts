@@ -235,6 +235,8 @@ export interface ModelCatalogAccountResponse {
   readonly status: string;
   readonly model_count: number;
   readonly models: ReadonlyArray<ModelCardResponse>;
+  readonly embedding_model_count: number;
+  readonly embedding_models: ReadonlyArray<ModelCardResponse>;
 }
 
 export interface ModelCatalogChainResponse {
@@ -242,8 +244,12 @@ export interface ModelCatalogChainResponse {
   readonly name: string;
   readonly model_selector?: string | null;
   readonly entry_count: number;
+  readonly chat_entry_count: number;
+  readonly embedding_entry_count: number;
   readonly model_count: number;
   readonly models: ReadonlyArray<ModelCardResponse>;
+  readonly embedding_model_count: number;
+  readonly embedding_models: ReadonlyArray<ModelCardResponse>;
   readonly health: "healthy" | "warning" | "broken" | string;
   readonly issues: ReadonlyArray<ChainIssueResponse>;
 }
@@ -254,6 +260,7 @@ export interface ChainIssueResponse {
   readonly position?: number | null;
   readonly account_id?: string | null;
   readonly model?: string | null;
+  readonly route?: ChainRoute | null;
 }
 
 export interface ProviderModelCatalogResponse {
@@ -274,6 +281,8 @@ export interface ModelCatalogResponse {
   readonly refreshed: boolean;
   readonly model_count: number;
   readonly models: ReadonlyArray<ModelCardResponse>;
+  readonly embedding_model_count: number;
+  readonly embedding_models: ReadonlyArray<ModelCardResponse>;
   readonly accounts: ReadonlyArray<ModelCatalogAccountResponse>;
   readonly chains: ReadonlyArray<ModelCatalogChainResponse>;
   readonly providers: ReadonlyArray<ProviderModelCatalogResponse>;
@@ -289,14 +298,17 @@ export interface ChainEntryResponse {
   readonly position: number;
   readonly model?: string | null;
   readonly fallback_policy?: FallbackPolicy;
+  readonly route: ChainRoute;
 }
 
 export type FallbackPolicy = "any_error" | "auth_or_retryable" | "retryable";
+export type ChainRoute = "chat" | "embeddings";
 
 export interface ChainEntryRequest {
   readonly account_id: string;
   readonly model?: string | null;
   readonly fallback_policy?: FallbackPolicy;
+  readonly route?: ChainRoute;
 }
 
 export interface ChainResponse {

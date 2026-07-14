@@ -18,7 +18,7 @@ Covered behaviour:
   subsequent reads (Requirement 10.4);
 * an entry may reference a soft-deleted credential and is retained (Requirements 11.2,
   11.4);
-* ``(chain_id, position)`` is unique;
+* ``(chain_id, route_kind, position)`` is unique;
 * ``load_routing_chain`` maps rows to the pure ``RoutingChain``;
 * missing chains raise ``NotFound``.
 """
@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import (
 from gozar.accounts.models import CredentialKind, CredentialStatus, UpstreamCredential
 from gozar.core.db import Base
 from gozar.core.errors import NotFound
-from gozar.routing.chains import FallbackPolicy, RoutingChain
+from gozar.routing.chains import FallbackPolicy, RouteKind, RoutingChain
 from gozar.routing.models import RouteFallbackChain, RouteFallbackChainEntry
 from gozar.routing.service import (
     ChainEntryInput,
@@ -125,6 +125,35 @@ async def test_create_chain_persists_entries_in_order(session: AsyncSession) -> 
 async def test_create_empty_chain_has_no_entries(session: AsyncSession) -> None:
     view = await create_chain(session, "empty", [])
     assert view.entries == ()
+
+
+async def test_chat_and_embedding_lanes_have_independent_positions(
+    session: AsyncSession,
+) -> None:
+    chat_primary = await _make_credential(session)
+    chat_fallback = await _make_credential(session)
+    embedding_primary = await _make_credential(session)
+
+    view = await create_chain(
+        session,
+        "dual-lane",
+        [
+            ChainEntryInput(chat_primary),
+            ChainEntryInput(
+                embedding_primary,
+                "text-embedding-3-small",
+                route_kind=RouteKind.EMBEDDINGS,
+            ),
+            ChainEntryInput(chat_fallback, "gpt-fallback"),
+        ],
+    )
+
+    assert [entry.route_kind for entry in view.entries] == [
+        RouteKind.CHAT,
+        RouteKind.CHAT,
+        RouteKind.EMBEDDINGS,
+    ]
+    assert [entry.position for entry in view.entries] == [0, 1, 0]
 
 
 # --- read ---------------------------------------------------------------------
@@ -257,7 +286,7 @@ async def test_chain_id_position_is_unique(session: AsyncSession) -> None:
     a = await _make_credential(session)
     created = await create_chain(session, "chain", [a])
 
-    # Force a duplicate (chain_id, position) and expect the constraint to reject it.
+    # Force a duplicate lane position and expect the constraint to reject it.
     session.add(
         RouteFallbackChainEntry(
             chain_id=created.chain_id, position=0, account_id=a
@@ -284,6 +313,24 @@ async def test_load_routing_chain_maps_to_value_object(
     assert [target.account_id for target in routing.entries] == [a, b]
     assert routing.chain_id == created.chain_id
     assert routing.model_selector == "claude-3-5"
+
+
+async def test_routing_chain_filters_request_lanes(session: AsyncSession) -> None:
+    chat = await _make_credential(session)
+    embeddings = await _make_credential(session)
+    created = await create_chain(
+        session,
+        "dual-lane",
+        [
+            ChainEntryInput(chat),
+            ChainEntryInput(embeddings, route_kind=RouteKind.EMBEDDINGS),
+        ],
+    )
+
+    routing = await load_routing_chain(session, created.chain_id)
+
+    assert routing.for_route(RouteKind.CHAT).account_ids == (chat,)
+    assert routing.for_route(RouteKind.EMBEDDINGS).account_ids == (embeddings,)
 
 
 # --- delete -------------------------------------------------------------------

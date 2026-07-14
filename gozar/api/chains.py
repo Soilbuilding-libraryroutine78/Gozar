@@ -49,6 +49,7 @@ def _entry_inputs(payload: CreateChainRequest | EditChainRequest) -> list[ChainE
             account_id=entry.account_id,
             model_id=entry.model,
             fallback_policy=entry.fallback_policy,
+            route_kind=entry.route,
         )
         for entry in entries
     ]

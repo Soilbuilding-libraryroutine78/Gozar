@@ -27,8 +27,8 @@ API key, while the operator manages upstream credentials in one place.
 
 ## What You Get
 
-- **Drop-in OpenAI compatibility** - use `/v1/chat/completions`, streaming SSE, and
-  `/v1/models` with standard OpenAI-style request and response shapes.
+- **Drop-in OpenAI compatibility** - use `/v1/chat/completions`, `/v1/embeddings`,
+  streaming SSE, and `/v1/models` with standard OpenAI-style shapes.
 - **One API key per app or workflow** - issue Gozar API keys for each local project,
   agent, backend service, or team integration.
 - **Bring your own upstream access** - connect API-key providers such as OpenAI and
@@ -37,15 +37,14 @@ API key, while the operator manages upstream credentials in one place.
 - **Codex device-code sign-in** - Codex subscription connect does not depend on a
   broken `localhost` redirect. Gozar shows a one-time code and completes the account
   connection after OpenAI approval.
-- **Provider-aware fallback chains** - every node selects its own account, model,
-  and fallback policy, so an OpenAI model can fail over to a differently named
-  OpenRouter, Codex, or Anthropic model.
+- **Two-lane fallback chains** - one chain ID contains an LLM lane and an Embeddings
+  lane. Every node selects its own account, model, and fallback policy.
 - **Chain health alerts** - saved routes are rechecked against current account
   status and model catalogs; removed models and unavailable accounts are surfaced
   before they become silent production failures.
-- **Model discovery** - clients can call `/v1/models`; API-key providers with live
-  model-listing endpoints are refreshed and cached, while subscription providers can
-  use runtime fallback catalogs.
+- **Route-aware model discovery** - Chat and Embeddings catalogs are discovered,
+  cached, and refreshed independently for each API-key account; subscription
+  providers can use runtime fallback catalogs.
 - **LangChain and LangGraph friendly** - point `ChatOpenAI` at the Gozar `/v1` base
   URL and use the Gozar API key. Chain selection happens inside Gozar.
 - **Usage limits, traces, and analytics** - track request volume, token usage,
@@ -93,9 +92,12 @@ flowchart LR
     Gozar --> Token{Valid Gozar API key?}
     Token -->|no| Reject[401 before upstream call]
     Token -->|yes| Chain[Fallback chain]
-    Chain --> AccountA[OpenAI account + OpenAI model]
-    Chain --> AccountB[OpenRouter account + provider model]
-    Chain --> AccountC[Subscription account + subscription model]
+    Chain --> Endpoint{Request endpoint}
+    Endpoint -->|Chat Completions| LLM[LLM lane]
+    Endpoint -->|Embeddings| Embed[Embeddings lane]
+    LLM --> AccountA[Subscription primary]
+    LLM --> AccountB[API-key fallback + chat model]
+    Embed --> AccountC[OpenAI or OpenRouter + embedding model]
     AccountA --> Provider[Upstream provider]
     AccountB --> Provider
     AccountC --> Provider
@@ -181,7 +183,7 @@ through first-run bootstrap:
 2. Create the first admin username and password.
 3. Sign in.
 4. Connect upstream accounts.
-5. Build a fallback chain and choose a model for each provider node.
+5. Build a chain, configure its LLM lane, and add an Embeddings lane when needed.
 6. Create a Gozar API key for your app and pin its normal chain.
 7. Copy the integration values from the API Keys page or open **Docs**.
 
@@ -232,19 +234,26 @@ fallback:
 
 ## Build a Provider-Aware Fallback Chain
 
-Open **Chains** and create a route. Each node is an independent provider attempt:
+Open **Chains** and create one route with up to two independent lanes:
 
-1. Add the primary account and choose one of that account's current models.
-2. Add a fallback account, such as OpenRouter, and choose a model from that
-   account's own catalog.
-3. Order the nodes. Gozar stops at the first successful response.
-4. Choose when each failed node may continue:
+1. In **LLM**, add the primary Chat account, for example a Codex subscription.
+2. Add an LLM fallback such as OpenRouter and select that provider's chat model.
+3. In **Embeddings**, add an OpenAI or OpenRouter account and select its embedding
+   model. Add more nodes only when embedding fallback is required.
+4. Order each lane independently. Gozar stops at the first successful node in the
+   lane selected by the request endpoint.
+5. Choose when each failed node may continue:
    - `any_error` - continue after any typed provider failure; this preserves the
      original Gozar behavior.
    - `auth_or_retryable` - continue after an upstream `401`/`403`, transport error,
      `429`, or `5xx`.
    - `retryable` - continue only after transport errors, `429`, or `5xx`.
-5. Save the route and resolve any health warning shown on the chain or Dashboard.
+6. Save the route and resolve any health warning shown on the chain or Dashboard.
+
+`POST /v1/chat/completions` always uses the LLM lane. `POST /v1/embeddings` always
+uses the Embeddings lane. The client sends no routing-mode flag, and the same Gozar
+API key and chain ID work for both endpoints. A missing requested lane fails closed
+with `NO_AVAILABLE_ACCOUNT` instead of silently using the wrong provider.
 
 The model on a node is the exact model sent to that provider. Leaving it empty
 forwards the inbound request model unchanged and is appropriate only when both
@@ -285,12 +294,19 @@ curl -X PUT "$GOZAR_ADMIN_BASE_URL/api/chains/by-key/support-production" \
     "entries": [
       {
         "account_id": "OPENAI_ACCOUNT_UUID",
-        "model": "gpt-5.4-mini",
-        "fallback_policy": "auth_or_retryable"
+        "model": "PRIMARY_CHAT_MODEL_ID",
+        "fallback_policy": "auth_or_retryable",
+        "route": "chat"
       },
       {
         "account_id": "OPENROUTER_ACCOUNT_UUID",
-        "model": "google/gemini-2.5-flash"
+        "model": "OPENROUTER_CHAT_MODEL_ID",
+        "route": "chat"
+      },
+      {
+        "account_id": "OPENROUTER_ACCOUNT_UUID",
+        "model": "OPENROUTER_EMBEDDING_MODEL_ID",
+        "route": "embeddings"
       }
     ]
   }'
@@ -317,6 +333,7 @@ For local Docker:
 export GOZAR_BASE_URL="http://localhost:8000/v1"
 export GOZAR_API_KEY="gz-YOUR_GOZAR_API_KEY"
 export GOZAR_MODEL="MODEL_RETURNED_BY_V1_MODELS"
+export GOZAR_EMBEDDING_MODEL="PROVIDER_EMBEDDING_MODEL"
 export GOZAR_CHAIN_ID="OPTIONAL_CHAIN_UUID"
 ```
 
@@ -326,6 +343,7 @@ For production:
 export GOZAR_BASE_URL="https://gozar.example.com/v1"
 export GOZAR_API_KEY="gz-YOUR_GOZAR_API_KEY"
 export GOZAR_MODEL="MODEL_RETURNED_BY_V1_MODELS"
+export GOZAR_EMBEDDING_MODEL="PROVIDER_EMBEDDING_MODEL"
 export GOZAR_CHAIN_ID="OPTIONAL_CHAIN_UUID"
 ```
 
@@ -357,6 +375,45 @@ curl "$GOZAR_BASE_URL/chat/completions" \
     \"stream\": true
   }"
 ```
+
+### Embeddings for RAG and vector memory
+
+`POST /v1/embeddings` follows the standard OpenAI request and response contract.
+It uses the same Gozar API key, assigned chain, per-call chain override, limits,
+usage records, and traces as Chat Completions, but automatically selects the
+chain's Embeddings lane.
+
+```bash
+curl "$GOZAR_BASE_URL/embeddings" \
+  -H "Authorization: Bearer $GOZAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"$GOZAR_EMBEDDING_MODEL\",
+    \"input\": [\"first document\", \"second document\"],
+    \"encoding_format\": \"float\"
+  }"
+```
+
+Embedding nodes accept only embedding-capable OpenAI or OpenRouter API-key accounts.
+Each node may store a different provider model, for example
+`text-embedding-3-small` on OpenAI and `openai/text-embedding-3-small` on
+OpenRouter. The node model overrides the inbound model for that attempt, so fallback
+between providers with different model IDs remains transparent. A blank node model
+forwards the caller's model unchanged. Gozar never synthesizes a placeholder vector.
+
+```python
+response = client.embeddings.create(
+    model=os.environ["GOZAR_EMBEDDING_MODEL"],
+    input=["first document", "second document"],
+    encoding_format="float",
+)
+
+vectors = [item.embedding for item in response.data]
+```
+
+See the official [OpenAI Embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)
+and [OpenRouter Embeddings API](https://openrouter.ai/docs/api/reference/embeddings)
+for provider model and input details.
 
 ### OpenAI Python SDK
 
@@ -423,15 +480,17 @@ through the body instead of a header, pass
 
 ### Response compatibility and Gozar metadata
 
-The default `POST /v1/chat/completions` body stays inside the OpenAI Chat
-Completions schema. This is the compatibility contract used by the OpenAI Python and
-JavaScript SDKs, LangChain, LangGraph, LangSmith, and other OpenAI-compatible clients.
-Gozar does not add private fields to normal responses.
+The default `POST /v1/chat/completions` and `POST /v1/embeddings` bodies stay inside
+their OpenAI schemas. This is the compatibility contract used by the OpenAI Python
+and JavaScript SDKs, LangChain, LangGraph, LangSmith, and other OpenAI-compatible
+clients. Gozar does not add private fields to normal responses.
 
-Every completion response includes these HTTP headers:
+Every successful non-streaming Chat Completions or Embeddings response includes
+these HTTP headers:
 
 - `x-request-id` and `x-gozar-trace-id` - the request correlation ID.
 - `x-gozar-chain-id` - the effective saved chain on non-streaming success.
+- `x-gozar-route` - `chat` or `embeddings`, selected from the request endpoint.
 - `x-gozar-node-id` and `x-gozar-node-position` - the selected chain node.
 - `x-gozar-provider`, `x-gozar-model`, and `x-gozar-attempt-count` - compact routing
   facts for raw HTTP clients.
@@ -451,8 +510,10 @@ non-streaming call:
 }
 ```
 
-The response then includes a top-level `gozar` object containing `trace_id` and the
-same secret-free routing attempt data. This extension is opt-in because LangChain's
+The response then includes a top-level `gozar` object containing `trace_id` and
+client-safe routing attempt data. Internal account IDs and credential labels stay in
+the operator trace and are not returned to application API keys. This extension is
+opt-in because LangChain's
 `ChatOpenAI` intentionally normalizes official OpenAI response fields and does not
 guarantee preservation of provider-specific fields. Standard `llm.invoke()` calls
 should therefore use `AIMessage.usage_metadata` / `response_metadata` and use the
@@ -470,16 +531,24 @@ curl "$GOZAR_BASE_URL/models" \
 Behavior:
 
 - If the Gozar API key is pinned to a fallback chain, `/v1/models` returns models
-  reachable through that chain.
+  reachable through its LLM lane. The admin catalog separately supplies embedding
+  model suggestions to every compatible Chain node.
 - If the key is not pinned, `/v1/models` returns the deployment's auto-routing model
   catalog.
 - API-key providers such as OpenAI and OpenRouter can be queried through their live
   `/models` endpoints and cached per account, because two API keys for the same
   provider may have different model access.
+- OpenRouter discovery requests `output_modalities=embeddings` for the Embeddings
+  lane. OpenAI's basic model cards do not include endpoint capabilities, so Gozar
+  classifies the embedding families in that account's live `/models` result. Chat
+  and Embeddings use separate Redis cache entries.
 - Providers without a live model-listing endpoint use configured or runtime fallback
   model lists.
 - The console rechecks the catalog after the configured cache TTL; model updates and
   chain health changes do not require a backend restart.
+- The Chain editor uses a native, mobile-friendly model selector and preselects the
+  first currently advertised model. Manual model ID entry remains available only as
+  a fallback for private or newly introduced provider models.
 
 Runtime fallback models can be updated without restarting the backend:
 
@@ -559,7 +628,7 @@ Core modules:
 - `gozar/accounts` - upstream account connect, encrypted credentials, refresh.
 - `gozar/tokens` - Gozar API key creation, reveal, rotation, revocation.
 - `gozar/routing` - fallback chains and routing decisions.
-- `gozar/gateway` - OpenAI-compatible `/v1` request handling.
+- `gozar/gateway` - OpenAI-compatible Chat Completions, Embeddings, and model listing.
 - `gozar/translation` - provider-specific request and response adapters.
 - `gozar/usage` - metering, traces, and analytics inputs.
 - `frontend/` - React + TypeScript admin console.
@@ -654,6 +723,9 @@ path such as:
 https://your-gozar-domain.example/v1/chat/completions
 ```
 
+The same base URL is used by SDK `embeddings.create()` calls, which resolve to
+`https://your-gozar-domain.example/v1/embeddings`.
+
 ### I see `401` from Gozar
 
 The Gozar API key is missing, revoked, disabled, or not active. Use a key that starts
@@ -684,9 +756,18 @@ or OAuth clients that require loopback redirects.
 ### `/v1/models` is missing a model
 
 For API-key providers, refresh the provider's live model list by waiting for the
-cache TTL or updating provider configuration. For subscription providers without a
-live listing endpoint, update the provider fallback list from the Dashboard/Admin
-API.
+cache TTL or selecting **Refresh models** on the Dashboard. Embedding discovery is
+independent from the LLM list. For subscription providers without a live listing
+endpoint, update the provider fallback list from the Dashboard/Admin API.
+
+### Embeddings returns `NO_AVAILABLE_ACCOUNT`
+
+The selected API key chain has no active node in its Embeddings lane. Open the chain,
+select **Embeddings**, and add an OpenAI or OpenRouter API-key account with the exact
+embedding model for that provider. The editor normally discovers and selects the
+model automatically; if the account advertises no embedding model, reconnect or
+refresh that account before using the manual fallback. The LLM lane is intentionally
+not reused.
 
 ## Development
 

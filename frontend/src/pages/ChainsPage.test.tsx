@@ -54,7 +54,9 @@ const sampleChain: ChainResponse = {
   chain_id: "chain-1",
   name: "Primary failover",
   model_selector: null,
-  entries: [{ account_id: "acct-1", position: 0, model: "gpt-5.4-mini" }],
+  entries: [
+    { account_id: "acct-1", position: 0, model: "gpt-5.4-mini", route: "chat" },
+  ],
 };
 
 const sampleCatalog: ModelCatalogResponse = {
@@ -63,6 +65,11 @@ const sampleCatalog: ModelCatalogResponse = {
   refreshed: false,
   model_count: 1,
   models: [{ id: "gpt-5.4-mini", object: "model", owned_by: "openai" }],
+  embedding_model_count: 2,
+  embedding_models: [
+    { id: "text-embedding-3-small", object: "model", owned_by: "openai" },
+    { id: "text-embedding-3-large", object: "model", owned_by: "openai" },
+  ],
   accounts: [
     {
       account_id: sampleAccount.account_id,
@@ -72,6 +79,11 @@ const sampleCatalog: ModelCatalogResponse = {
       status: sampleAccount.status,
       model_count: 1,
       models: [{ id: "gpt-5.4-mini", object: "model", owned_by: "openai" }],
+      embedding_model_count: 2,
+      embedding_models: [
+        { id: "text-embedding-3-small", object: "model", owned_by: "openai" },
+        { id: "text-embedding-3-large", object: "model", owned_by: "openai" },
+      ],
     },
   ],
   chains: [
@@ -80,8 +92,12 @@ const sampleCatalog: ModelCatalogResponse = {
       name: sampleChain.name,
       model_selector: null,
       entry_count: 1,
+      chat_entry_count: 1,
+      embedding_entry_count: 0,
       model_count: 1,
       models: [{ id: "gpt-5.4-mini", object: "model", owned_by: "openai" }],
+      embedding_model_count: 0,
+      embedding_models: [],
       health: "healthy",
       issues: [],
     },
@@ -141,12 +157,17 @@ describe("ChainsPage async states (Requirement 17.3)", () => {
 
     renderWithProviders(<ChainsPage />);
 
-    expect(await screen.findByText("Build a provider-aware route")).toBeInTheDocument();
-    expect(screen.getByText("1 step")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Route each request to the right provider"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 LLM")).toBeInTheDocument();
+    expect(screen.getByText("0 Embeddings")).toBeInTheDocument();
     expect(screen.getByText("1 available")).toBeInTheDocument();
-    expect(screen.getByLabelText("Route preview")).toHaveTextContent("Request");
-    expect(screen.getByLabelText("Route preview")).toHaveTextContent("Primary OpenAI");
-    expect(screen.getByLabelText("Route preview")).toHaveTextContent("Response");
+    expect(screen.getByLabelText("LLM route preview")).toHaveTextContent("Primary OpenAI");
+    expect(screen.getByLabelText("LLM route preview")).toHaveTextContent("Response");
+    expect(screen.getByLabelText("Embeddings route preview")).toHaveTextContent(
+      "Not configured",
+    );
   });
 });
 
@@ -161,7 +182,14 @@ describe("Chain editor required fields (Requirement 17.3)", () => {
         initial={null}
         accounts={accounts}
         accountsById={indexAccounts(accounts)}
-        modelsByAccount={new Map([["acct-1", ["gpt-5.4-mini"]]])}
+        modelsByAccount={
+          new Map([
+            [
+              "acct-1",
+              { chat: ["gpt-5.4-mini"], embeddings: ["text-embedding-3-small"] },
+            ],
+          ])
+        }
         submitting={false}
         error={null}
         onSubmit={onSubmit}
@@ -179,7 +207,7 @@ describe("Chain editor required fields (Requirement 17.3)", () => {
     await user.type(screen.getByLabelText("Name"), "Primary failover");
     await user.click(save);
     expect(
-      await screen.findByText("Add at least one account to the chain."),
+      await screen.findByText("Add at least one node to the LLM or Embeddings route."),
     ).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
 
@@ -204,9 +232,96 @@ describe("Chain editor required fields (Requirement 17.3)", () => {
           account_id: "acct-1",
           model: "gpt-5.4-mini",
           fallback_policy: "any_error",
+          route: "chat",
         },
       ],
       model_selector: null,
     });
+  });
+
+  it("builds a separate embeddings lane in the same chain", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const accounts: ReadonlyArray<AccountResponse> = [sampleAccount];
+
+    renderWithProviders(
+      <ChainEditor
+        initial={null}
+        accounts={accounts}
+        accountsById={indexAccounts(accounts)}
+        modelsByAccount={
+          new Map([
+            [
+              "acct-1",
+              {
+                chat: ["gpt-5.4-mini"],
+                embeddings: ["text-embedding-3-small", "text-embedding-3-large"],
+              },
+            ],
+          ])
+        }
+        submitting={false}
+        error={null}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "RAG production");
+    await user.click(screen.getByRole("tab", { name: /Embeddings/ }));
+    await user.selectOptions(screen.getByLabelText("Add account"), "acct-1");
+    await user.click(screen.getByRole("button", { name: "Add node" }));
+    expect(screen.getByLabelText("Model for this node")).toHaveValue(
+      "text-embedding-3-small",
+    );
+    expect(screen.getByText(/2 embedding models discovered/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Create chain" }));
+
+    expect(onSubmit).toHaveBeenCalledWith({
+      name: "RAG production",
+      entries: [
+        {
+          account_id: "acct-1",
+          model: "text-embedding-3-small",
+          fallback_policy: "any_error",
+          route: "embeddings",
+        },
+      ],
+      model_selector: null,
+    });
+  });
+
+  it("keeps a manual model fallback when discovery has no match", async () => {
+    const user = userEvent.setup();
+    const accounts: ReadonlyArray<AccountResponse> = [sampleAccount];
+
+    renderWithProviders(
+      <ChainEditor
+        initial={null}
+        accounts={accounts}
+        accountsById={indexAccounts(accounts)}
+        modelsByAccount={
+          new Map([
+            [
+              "acct-1",
+              { chat: ["gpt-5.4-mini"], embeddings: ["text-embedding-3-small"] },
+            ],
+          ])
+        }
+        submitting={false}
+        error={null}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: /Embeddings/ }));
+    await user.selectOptions(screen.getByLabelText("Add account"), "acct-1");
+    await user.click(screen.getByRole("button", { name: "Add node" }));
+    await user.selectOptions(screen.getByLabelText("Model for this node"), "__manual_model__");
+    await user.clear(screen.getByLabelText("Manual model ID"));
+    await user.type(screen.getByLabelText("Manual model ID"), "vendor/custom-embedding");
+
+    expect(screen.getByLabelText("Manual model ID")).toHaveValue(
+      "vendor/custom-embedding",
+    );
   });
 });

@@ -37,6 +37,7 @@ from gozar.core.errors import ConfigError, UpstreamError
 from gozar.gateway.streaming import iter_sse_data
 from gozar.providers.client import UpstreamClient
 from gozar.providers.registry import AdapterKind, ProviderEntry
+from gozar.translation.types import OpenAIEmbeddingRequest
 
 # Upstream request path per adapter kind. These are fixed parts of each provider's
 # wire protocol, joined onto the configured provider base URL by the UpstreamClient:
@@ -86,6 +87,17 @@ def upstream_path(entry: ProviderEntry) -> str:
             f"{entry.adapter_kind.value!r}"
         )
     return path
+
+
+def embeddings_path(entry: ProviderEntry) -> str:
+    """Return the provider's embeddings path or fail closed when unsupported."""
+
+    if entry.embeddings_path is None:
+        raise ConfigError(
+            f"upstream provider {entry.provider_id.value!r} does not support "
+            "embeddings through Gozar"
+        )
+    return entry.embeddings_path
 
 
 def build_auth_headers(
@@ -253,6 +265,32 @@ async def call_upstream(
     return response.json()
 
 
+async def call_upstream_embeddings(
+    entry: ProviderEntry,
+    material: ProviderCredentialMaterial,
+    request: OpenAIEmbeddingRequest,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Forward one OpenAI-compatible embeddings request to a capable provider."""
+
+    settings = settings or get_settings()
+    headers = build_auth_headers(entry, material, entry.adapter)
+    body = request.model_dump(
+        mode="json",
+        by_alias=True,
+        exclude_none=True,
+    )
+    async with UpstreamClient(entry, settings=settings) as client:
+        response = await client.request(
+            "POST",
+            embeddings_path(entry),
+            headers=headers,
+            json=body,
+        )
+    return response.json()
+
+
 async def call_upstream_stream(
     entry: ProviderEntry,
     material: ProviderCredentialMaterial,
@@ -294,7 +332,9 @@ async def call_upstream_stream(
 __all__ = [
     "build_auth_headers",
     "call_upstream",
+    "call_upstream_embeddings",
     "call_upstream_stream",
+    "embeddings_path",
     "to_json_body",
     "upstream_path",
 ]

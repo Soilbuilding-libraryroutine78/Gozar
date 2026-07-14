@@ -11,6 +11,7 @@ from gozar.providers.registry import (
     get_adapter,
     get_provider,
     list_providers,
+    provider_supports_embeddings,
     register_adapter,
     supported_provider_ids,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "get_adapter",
     "get_provider",
     "list_providers",
+    "provider_supports_embeddings",
     "register_adapter",
     "supported_provider_ids",
     "UpstreamClient",

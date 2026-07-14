@@ -42,7 +42,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any
+from typing import Any, Protocol
 
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -72,7 +72,7 @@ from gozar.core.redis import get_redis
 from gozar.gateway.streaming import SSE_DONE, format_sse_chunk, is_done, iter_sse_data
 from gozar.gateway.upstream import call_upstream, call_upstream_stream
 from gozar.providers.registry import ProviderEntry, get_provider
-from gozar.routing.chains import FallbackPolicy, RoutingChain, RoutingTarget
+from gozar.routing.chains import FallbackPolicy, RouteKind, RoutingChain, RoutingTarget
 from gozar.routing.service import list_chains, load_routing_chain
 from gozar.routing.session import get_attempt_order, record_session_binding
 from gozar.routing.state import CredentialState
@@ -116,6 +116,12 @@ MaterialAcquirer = Callable[
 # account and let the caller retry once with freshly acquired material.
 ReactiveRefresher = Callable[[AsyncSession, uuid.UUID], Awaitable[bool]]
 
+
+class ModelRequest(Protocol):
+    """Minimal request contract shared by chat and embeddings routing."""
+
+    model: str
+
 # Injectable streaming network seam: the streaming analogue of :data:`UpstreamCaller`.
 # Given the resolved provider entry, decrypted credential material, the provider
 # adapter, and the translated provider request body, open the upstream streaming call
@@ -140,6 +146,7 @@ class _PipelineTrace:
     attempts: list[dict[str, Any]] = field(default_factory=list)
     selected_node_id: uuid.UUID | None = None
     selected_position: int | None = None
+    route_kind: RouteKind | None = None
 
     def routing_meta(self) -> dict[str, Any] | None:
         """Return the namespaced routing metadata persisted with the trace."""
@@ -152,6 +159,8 @@ class _PipelineTrace:
         }
         if self.chain_id is not None:
             meta["chain_id"] = str(self.chain_id)
+        if self.route_kind is not None:
+            meta["route"] = self.route_kind.value
         if self.selected_node_id is not None:
             meta["selected_node_id"] = str(self.selected_node_id)
         if self.selected_position is not None:
@@ -241,6 +250,7 @@ async def _select_chain(
     session: AsyncSession,
     model: str,
     *,
+    route_kind: RouteKind = RouteKind.CHAT,
     assigned_chain_id: uuid.UUID | None = None,
     override_chain_id: uuid.UUID | None = None,
 ) -> RoutingChain | None:
@@ -248,10 +258,9 @@ async def _select_chain(
 
     When the authenticated Client_Token is pinned to a chain, that chain is used
     directly and its model selector is ignored; the token itself becomes the routing
-    choice. Otherwise the historical auto mode is preserved: prefer a chain whose
-    ``model_selector`` matches the requested model exactly, then fall back to the
-    first chain with no selector (a catch-all). Returns ``None`` when no chain
-    applies, which the caller treats as "no available account".
+    choice. Otherwise auto mode considers only chains containing the requested
+    endpoint lane, prefers an exact ``model_selector`` match, then falls back to the
+    first eligible chain without a selector. Returns ``None`` when no chain applies.
     """
     selected_chain_id = override_chain_id or assigned_chain_id
     if selected_chain_id is not None:
@@ -264,9 +273,14 @@ async def _select_chain(
     if not chains:
         return None
 
-    matched = next((c for c in chains if c.model_selector == model), None)
+    eligible = [
+        chain
+        for chain in chains
+        if any(entry.route_kind is route_kind for entry in chain.entries)
+    ]
+    matched = next((c for c in eligible if c.model_selector == model), None)
     if matched is None:
-        matched = next((c for c in chains if c.model_selector is None), None)
+        matched = next((c for c in eligible if c.model_selector is None), None)
     if matched is None:
         return None
 
@@ -726,6 +740,7 @@ async def complete_chat_completion(
         correlation_id,
         InboundMeta(
             method="POST",
+            endpoint="chat.completions",
             model=request.model,
             stream=request.stream,
             session_id=session_id,
@@ -783,12 +798,13 @@ async def _authenticate_and_route(
     settings: Settings,
     now: datetime,
     presented_token: str | None,
-    request: OpenAIChatRequest,
+    request: ModelRequest,
     session_id: str | None,
     chain_override_id: uuid.UUID | None = None,
     trusted_token_id: uuid.UUID | None = None,
     correlation_id: uuid.UUID,
     trace_context: _PipelineTrace,
+    route_kind: RouteKind = RouteKind.CHAT,
 ) -> tuple[uuid.UUID, list[RoutingTarget]]:
     """Run the pre-upstream half of the hot path shared by both response modes.
 
@@ -823,6 +839,7 @@ async def _authenticate_and_route(
     chain = await _select_chain(
         session,
         request.model,
+        route_kind=route_kind,
         assigned_chain_id=assigned_chain_id,
         override_chain_id=chain_override_id,
     )
@@ -833,10 +850,29 @@ async def _authenticate_and_route(
         )
 
     trace_context.chain_id = chain.chain_id
+    trace_context.route_kind = route_kind
     await set_trace_chain(session, correlation_id, chain.chain_id)
 
+    chain = chain.for_route(route_kind)
+    if not chain.entries:
+        if route_kind is RouteKind.EMBEDDINGS:
+            raise NoAvailableAccount(
+                "no available embeddings account: the selected chain has no "
+                "embeddings nodes; add an active OpenAI or OpenRouter API-key "
+                "account to its Embeddings route"
+            )
+        raise NoAvailableAccount(
+            "no available chat route: the selected chain has no LLM nodes"
+        )
+
     states = await _snapshot_states(session, redis, chain.account_ids, now=now)
-    attempt_order = await get_attempt_order(chain, states, session_id, redis=redis)
+    attempt_order = await get_attempt_order(
+        chain,
+        states,
+        session_id,
+        redis=redis,
+        route_kind=route_kind,
+    )
     if not attempt_order:
         raise NoAvailableAccount(
             "no available account: every credential in the fallback chain is "
@@ -938,7 +974,11 @@ async def _run_pipeline(
         )
         if session_id:
             await record_session_binding(
-                session_id, account_id, redis=redis, settings=settings
+                session_id,
+                account_id,
+                redis=redis,
+                settings=settings,
+                route_kind=RouteKind.CHAT,
             )
         await finalize_trace(
             session,
@@ -1341,6 +1381,7 @@ async def stream_chat_completion(
         correlation_id,
         InboundMeta(
             method="POST",
+            endpoint="chat.completions",
             model=request.model,
             stream=True,
             session_id=session_id,

@@ -78,6 +78,7 @@ def test_upsert_chain_by_key_reuses_id_and_updates_nodes(
             "position": 0,
             "model": "anthropic/claude-sonnet-4",
             "fallback_policy": "retryable",
+            "route": "chat",
         }
     ]
 
@@ -90,3 +91,40 @@ def test_chain_upsert_requires_manage_permission(client, auth_header):
     )
 
     assert response.status_code == 403
+
+
+def test_chain_api_persists_independent_chat_and_embedding_orders(
+    client, sessionmaker, auth_header
+):
+    primary_id, fallback_id = asyncio.run(_seed_accounts(sessionmaker))
+
+    response = client.post(
+        "/api/chains",
+        headers=auth_header("admin"),
+        json={
+            "name": "Dual route",
+            "entries": [
+                {"account_id": primary_id, "model": "gpt-chat", "route": "chat"},
+                {
+                    "account_id": fallback_id,
+                    "model": "provider-chat-model",
+                    "route": "chat",
+                },
+                {
+                    "account_id": fallback_id,
+                    "model": "provider-embedding-model",
+                    "route": "embeddings",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert [
+        (entry["route"], entry["position"], entry["model"])
+        for entry in response.json()["entries"]
+    ] == [
+        ("chat", 0, "gpt-chat"),
+        ("chat", 1, "provider-chat-model"),
+        ("embeddings", 0, "provider-embedding-model"),
+    ]

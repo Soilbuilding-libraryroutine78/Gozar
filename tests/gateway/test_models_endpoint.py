@@ -61,7 +61,7 @@ def _no_live_models(monkeypatch):
     the live-listing path override this per-test.
     """
 
-    async def _fake(provider, material, *, settings=None):
+    async def _fake(provider, material, *, route_kind, settings=None):
         return None
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake)
@@ -151,7 +151,7 @@ async def test_live_listing_overrides_configured_fallback(
 ):
     """When a live listing succeeds, it is advertised instead of the fallback."""
 
-    async def _fake_live(provider, material, *, settings=None):
+    async def _fake_live(provider, material, *, route_kind, settings=None):
         assert provider == "openai"
         return ["gpt-5.5", "gpt-5.5-mini"]
 
@@ -183,7 +183,7 @@ async def test_live_listing_failure_falls_back_to_configured_models(
     return here exercises exactly what the catalog sees on a real failure.
     """
 
-    async def _fake_live(provider, material, *, settings=None):
+    async def _fake_live(provider, material, *, route_kind, settings=None):
         return None
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake_live)
@@ -207,7 +207,7 @@ async def test_codex_provider_always_uses_configured_models(
 ):
     """Codex has no live listing endpoint, so it always uses the configured list."""
 
-    async def _fail_if_called(provider, material, *, settings=None):
+    async def _fail_if_called(provider, material, *, route_kind, settings=None):
         raise AssertionError(
             f"fetch_live_models must never be called for provider {provider!r}"
         )
@@ -243,7 +243,7 @@ async def test_runtime_provider_models_override_configured_fallback(
 ):
     """Subscription provider fallbacks can be updated without process restart."""
 
-    async def _fail_if_called(provider, material, *, settings=None):
+    async def _fail_if_called(provider, material, *, route_kind, settings=None):
         raise AssertionError(
             f"fetch_live_models must never be called for provider {provider!r}"
         )
@@ -285,7 +285,8 @@ async def test_pinned_token_lists_only_models_reachable_by_assigned_chain(
 ):
     """The public model list follows the presented key's route assignment."""
     from gozar.accounts.models import CredentialKind, CredentialStatus, UpstreamCredential
-    from gozar.routing.service import create_chain
+    from gozar.routing.chains import RouteKind
+    from gozar.routing.service import ChainEntryInput, create_chain
 
     settings.provider_models["codex"] = ["gpt-5.5", "gpt-5.4-mini"]
 
@@ -304,7 +305,14 @@ async def test_pinned_token_lists_only_models_reachable_by_assigned_chain(
         )
         session.add_all([codex, openai])
         await session.flush()
-        chain = await create_chain(session, "codex-only", [codex.id])
+        chain = await create_chain(
+            session,
+            "dual-lane",
+            [
+                ChainEntryInput(codex.id),
+                ChainEntryInput(openai.id, route_kind=RouteKind.EMBEDDINGS),
+            ],
+        )
         issued = await create_token(
             session,
             "models-token",

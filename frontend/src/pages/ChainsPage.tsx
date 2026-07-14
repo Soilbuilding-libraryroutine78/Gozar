@@ -26,7 +26,11 @@ import type {
   ModelCatalogResponse,
 } from "../api/types";
 import { Modal } from "./accounts/Modal";
-import { ChainEditor, type ChainDraft } from "./chains/ChainEditor";
+import {
+  ChainEditor,
+  type AccountRouteModels,
+  type ChainDraft,
+} from "./chains/ChainEditor";
 import { entryAvailability, indexAccounts } from "./chains/format";
 
 /** Translate any thrown error into a secret-free, displayable message. */
@@ -67,11 +71,14 @@ export function ChainsPage(): JSX.Element {
 
   const accountsById = useMemo(() => indexAccounts(accounts), [accounts]);
   const modelsByAccount = useMemo(() => {
-    const result = new Map<string, ReadonlyArray<string>>();
+    const result = new Map<string, AccountRouteModels>();
     for (const account of catalog?.accounts ?? []) {
       result.set(
         account.account_id,
-        account.models.map((model) => model.id),
+        {
+          chat: account.models.map((model) => model.id),
+          embeddings: account.embedding_models.map((model) => model.id),
+        },
       );
     }
     return result;
@@ -204,7 +211,7 @@ export function ChainsPage(): JSX.Element {
     <>
       <div className="toolbar">
         <p className="toolbar__lead">
-          Map each provider account to its own model, then order the fallback path.
+          Keep LLM and embedding fallbacks in one reusable route.
         </p>
         <button type="button" className="button button--primary" onClick={openCreate}>
           <PlusIcon size={18} aria-hidden />
@@ -214,22 +221,22 @@ export function ChainsPage(): JSX.Element {
 
       <PageGuide
         id="chains-guide-title"
-        title="Build a provider-aware route"
-        description="Every node owns an account and model. Gozar rewrites the model at each fallback, so OpenAI can fail over to an OpenRouter or subscription model with a different ID."
+        title="Route each request to the right provider"
+        description="One chain ID contains two independent paths. The endpoint selects the path automatically."
         steps={[
           {
-            title: "Choose accounts",
-            description: "Add the primary account, then choose one of that account's live models.",
+            title: "Build the LLM path",
+            description: "Order subscription and API-key accounts for Chat Completions.",
             Icon: AccountsIcon,
           },
           {
-            title: "Order the fallback",
-            description: "Add fallback accounts with their own models; the first successful node wins.",
+            title: "Build the embedding path",
+            description: "Choose OpenAI or OpenRouter accounts and their embedding models.",
             Icon: ChainIcon,
           },
           {
-            title: "Attach API keys",
-            description: "Pin this as a key default or override it for one LLM call by chain ID.",
+            title: "Attach one API key",
+            description: "Pin the chain once; Chat and Embeddings select their own path.",
             Icon: TokenIcon,
           },
         ]}
@@ -338,7 +345,12 @@ function ChainsBody({
     <ul className="chain-card-list">
       {rows.map((chain) => {
         const busy = busyId === chain.chain_id;
-        const ordered = [...chain.entries].sort((a, b) => a.position - b.position);
+        const chatEntries = chain.entries
+          .filter((entry) => (entry.route ?? "chat") === "chat")
+          .sort((a, b) => a.position - b.position);
+        const embeddingEntries = chain.entries
+          .filter((entry) => entry.route === "embeddings")
+          .sort((a, b) => a.position - b.position);
         const health = healthById.get(chain.chain_id);
         return (
           <li key={chain.chain_id} className="chain-card">
@@ -392,7 +404,12 @@ function ChainsBody({
               </div>
             </div>
 
-            <ChainCardStats chain={chain} accountsById={accountsById} ordered={ordered} />
+            <ChainCardStats
+              chain={chain}
+              accountsById={accountsById}
+              chatEntries={chatEntries}
+              embeddingEntries={embeddingEntries}
+            />
 
             {health && health.issues.length > 0 && (
               <div className="chain-health-note" role="status">
@@ -401,47 +418,30 @@ function ChainsBody({
                   <strong>Route needs an update</strong>
                   <ul>
                     {health.issues.slice(0, 3).map((issue) => (
-                      <li key={`${issue.code}-${issue.position ?? "chain"}`}>{issue.message}</li>
+                      <li key={`${issue.code}-${issue.route ?? "chain"}-${issue.position ?? "chain"}`}>
+                        {issue.message}
+                      </li>
                     ))}
                   </ul>
                 </div>
               </div>
             )}
 
-            {ordered.length === 0 ? (
+            {chatEntries.length === 0 && embeddingEntries.length === 0 ? (
               <p className="chain-card__empty">This chain has no entries.</p>
             ) : (
-              <>
-                <ChainRoutePreview ordered={ordered} accountsById={accountsById} />
-                <ol className="chain-chip-list">
-                  {ordered.map((entry) => {
-                    const availability = entryAvailability(entry.account_id, accountsById);
-                    return (
-                      <li
-                        key={`${entry.account_id}-${entry.position}`}
-                        className={
-                          availability.available
-                            ? "chain-chip"
-                            : "chain-chip chain-chip--unavailable"
-                        }
-                      >
-                        <span className="chain-chip__order" aria-hidden>
-                          {entry.position + 1}
-                        </span>
-                        <span className="chain-chip__label">{availability.label}</span>
-                        <span className="chain-chip__model">
-                          {entry.model ?? "Request model"}
-                        </span>
-                        {availability.reason !== null && (
-                          <span className={`badge badge--${availability.tone}`}>
-                            {availability.reason}
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ol>
-              </>
+              <div className="chain-card__lanes">
+                <ChainRoutePreview
+                  route="LLM"
+                  ordered={chatEntries}
+                  accountsById={accountsById}
+                />
+                <ChainRoutePreview
+                  route="Embeddings"
+                  ordered={embeddingEntries}
+                  accountsById={accountsById}
+                />
+              </div>
             )}
           </li>
         );
@@ -453,59 +453,77 @@ function ChainsBody({
 function ChainCardStats({
   chain,
   accountsById,
-  ordered,
+  chatEntries,
+  embeddingEntries,
 }: {
   readonly chain: ChainResponse;
   readonly accountsById: ReadonlyMap<string, AccountResponse>;
-  readonly ordered: ReadonlyArray<ChainResponse["entries"][number]>;
+  readonly chatEntries: ReadonlyArray<ChainResponse["entries"][number]>;
+  readonly embeddingEntries: ReadonlyArray<ChainResponse["entries"][number]>;
 }): JSX.Element {
-  const total = ordered.length;
+  const ordered = [...chatEntries, ...embeddingEntries];
   const available = ordered.filter((entry) =>
     entryAvailability(entry.account_id, accountsById).available,
   ).length;
-  const stepLabel = total === 1 ? "step" : "steps";
 
   return (
     <div className="chain-card__stats" aria-label={`${chain.name} route summary`}>
-      <span>{total} {stepLabel}</span>
+      <span>{chatEntries.length} LLM</span>
+      <span>{embeddingEntries.length} Embeddings</span>
       <span>{available} available</span>
-      <span>{ordered.filter((entry) => Boolean(entry.model)).length} mapped models</span>
     </div>
   );
 }
 
 function ChainRoutePreview({
+  route,
   ordered,
   accountsById,
 }: {
+  readonly route: "LLM" | "Embeddings";
   readonly ordered: ReadonlyArray<ChainResponse["entries"][number]>;
   readonly accountsById: ReadonlyMap<string, AccountResponse>;
 }): JSX.Element {
   return (
-    <div className="chain-route-preview" aria-label="Route preview">
-      <span className="chain-route-node chain-route-node--system">Request</span>
-      {ordered.map((entry) => {
-        const availability = entryAvailability(entry.account_id, accountsById);
-        return (
-          <span key={`${entry.account_id}-${entry.position}`} className="chain-route-step">
+    <section className="chain-card__lane" aria-label={`${route} route preview`}>
+      <div className="chain-card__lane-head">
+        <strong>{route}</strong>
+        <span>{ordered.length === 0 ? "Not configured" : `${ordered.length} nodes`}</span>
+      </div>
+      {ordered.length === 0 ? (
+        <p className="chain-card__lane-empty">No route configured.</p>
+      ) : (
+        <div className="chain-route-preview">
+          <span className="chain-route-node chain-route-node--system">{route}</span>
+          {ordered.map((entry) => {
+            const availability = entryAvailability(entry.account_id, accountsById);
+            return (
+              <span
+                key={`${route}-${entry.account_id}-${entry.position}`}
+                className="chain-route-step"
+              >
+                <span className="chain-route-connector" aria-hidden />
+                <span
+                  className={
+                    availability.available
+                      ? "chain-route-node"
+                      : "chain-route-node chain-route-node--unavailable"
+                  }
+                >
+                  {availability.label}
+                  <small>{entry.model ?? "Request model"}</small>
+                </span>
+              </span>
+            );
+          })}
+          <span className="chain-route-step">
             <span className="chain-route-connector" aria-hidden />
-            <span
-              className={
-                availability.available
-                  ? "chain-route-node"
-                  : "chain-route-node chain-route-node--unavailable"
-              }
-            >
-              {availability.label}
-              <small>{entry.model ?? "Request model"}</small>
+            <span className="chain-route-node chain-route-node--system">
+              {route === "LLM" ? "Response" : "Vectors"}
             </span>
           </span>
-        );
-      })}
-      <span className="chain-route-step">
-        <span className="chain-route-connector" aria-hidden />
-        <span className="chain-route-node chain-route-node--system">Response</span>
-      </span>
-    </div>
+        </div>
+      )}
+    </section>
   );
 }

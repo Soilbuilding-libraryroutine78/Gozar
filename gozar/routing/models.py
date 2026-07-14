@@ -10,8 +10,8 @@ Tables
   ``model_selector`` used by :func:`gozar.routing.session.get_attempt_order` to pick
   the chain for a requested model (Requirements 10.1, 10.4).
 * :class:`RouteFallbackChainEntry` -- ``route_fallback_chain_entry``: one row per
-  credential position within a chain. ``(chain_id, position)`` is unique and entries
-  are read in ascending ``position`` to produce the chain's attempt order
+  credential position within a request lane. ``(chain_id, route_kind, position)`` is
+  unique and entries are read in lane order to produce each attempt order
   (Requirement 10.1). ``account_id`` references an Upstream_Credential but is **not**
   cascade-deleted with it: a credential is soft-deleted (its row is retained with
   ``deleted_at`` set), so an entry may legitimately reference a deleted credential;
@@ -92,9 +92,9 @@ class RouteFallbackChain(Base):
 class RouteFallbackChainEntry(Base):
     """An ordered credential position within a chain (``route_fallback_chain_entry``).
 
-    ``(chain_id, position)`` is unique so a position is unambiguous within a chain;
-    entries are read in ascending ``position``. ``chain_id`` cascade-deletes with its
-    chain, but ``account_id`` does **not** cascade with the referenced
+    ``(chain_id, route_kind, position)`` is unique so each request lane has an
+    independent fallback order. ``chain_id`` cascade-deletes with its chain, but
+    ``account_id`` does **not** cascade with the referenced
     Upstream_Credential: credentials are soft-deleted (the row is retained), so an
     entry may point at a deleted credential, which the Flow_Controller skips at
     evaluation time (Requirements 11.2, 11.4).
@@ -102,7 +102,7 @@ class RouteFallbackChainEntry(Base):
 
     __tablename__ = "route_fallback_chain_entry"
     __table_args__ = (
-        UniqueConstraint("chain_id", "position"),
+        UniqueConstraint("chain_id", "route_kind", "position"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -116,8 +116,16 @@ class RouteFallbackChainEntry(Base):
         nullable=False,
         index=True,
     )
-    # Ordering within the chain; unique together with chain_id (Requirement 10.1).
+    # Ordering within one request lane; unique with chain_id + route_kind.
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+    # ``chat`` serves Chat Completions; ``embeddings`` serves Embeddings. Existing
+    # rows migrate to ``chat`` so deployed LLM routes retain their behavior.
+    route_kind: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="chat",
+        server_default="chat",
+    )
     # References an Upstream_Credential; intentionally no ON DELETE CASCADE so a
     # soft-deleted credential leaves the entry in place to be skipped (Req 11.2/11.4).
     account_id: Mapped[uuid.UUID] = mapped_column(

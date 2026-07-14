@@ -1,7 +1,7 @@
 """Proxy_Gateway HTTP router: the OpenAI-compatible ``/v1`` data-path.
 
-Exposes ``POST /v1/chat/completions`` as a drop-in OpenAI Chat Completions endpoint,
-serving both non-streaming responses and ``stream=true`` Server-Sent Events. The
+Exposes ``POST /v1/chat/completions`` and ``POST /v1/embeddings`` as drop-in OpenAI
+endpoints. Chat supports non-streaming responses and ``stream=true`` SSE. The
 ``/v1`` surface is authenticated by Client_Token only (presented as an
 ``Authorization: Bearer`` header) and never shares a session with the admin
 control-path. All error conditions are raised as
@@ -15,6 +15,7 @@ Client_Token exactly like ``/v1/chat/completions``.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -26,9 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gozar.core.db import get_session
 from gozar.core.errors import AuthError, GozarError, ValidationError
 from gozar.gateway.catalog import list_available_models_for_token
+from gozar.gateway.embeddings import complete_embedding
 from gozar.gateway.pipeline import complete_chat_completion, stream_chat_completion
 from gozar.tokens.service import verify
-from gozar.translation.types import OpenAIChatRequest, OpenAIModelList
+from gozar.translation.types import (
+    OpenAIChatRequest,
+    OpenAIEmbeddingRequest,
+    OpenAIModelList,
+)
 from gozar.usage.models import TraceLog
 from gozar.usage.service import get_trace
 
@@ -39,6 +45,10 @@ _SESSION_HEADER = "x-gozar-session"
 # ``gozar.chain_id`` for SDKs that expose provider-specific ``extra_body`` options.
 _CHAIN_HEADER = "x-gozar-chain-id"
 _TRACE_HEADER = "x-gozar-trace-id"
+_UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-"
+    r"[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b"
+)
 
 # Response headers that keep an SSE stream flowing unbuffered through common
 # reverse proxies (disable caching and proxy response buffering).
@@ -65,6 +75,7 @@ def _routing_headers(trace: TraceLog) -> dict[str, str]:
     headers: dict[str, str] = {}
     for key, header in (
         ("chain_id", "x-gozar-chain-id"),
+        ("route", "x-gozar-route"),
         ("selected_node_id", "x-gozar-node-id"),
         ("selected_position", "x-gozar-node-position"),
         ("attempt_count", "x-gozar-attempt-count"),
@@ -95,13 +106,69 @@ def _routing_headers(trace: TraceLog) -> dict[str, str]:
 
 
 def _gozar_extension(trace: TraceLog) -> dict[str, Any]:
-    """Build the opt-in, namespaced response extension from persisted trace data."""
+    """Build a client-safe extension without exposing internal account identity."""
 
     extension: dict[str, Any] = {"trace_id": str(trace.correlation_id)}
     routing = (trace.outbound_meta or {}).get("routing")
     if isinstance(routing, dict):
-        extension["routing"] = routing
+        public_routing: dict[str, Any] = {
+            key: routing[key]
+            for key in (
+                "chain_id",
+                "route",
+                "selected_node_id",
+                "selected_position",
+                "attempt_count",
+            )
+            if key in routing
+        }
+        attempts = routing.get("attempts")
+        if isinstance(attempts, list):
+            public_routing["attempts"] = [
+                _public_attempt(attempt)
+                for attempt in attempts
+                if isinstance(attempt, dict)
+            ]
+        extension["routing"] = public_routing
     return extension
+
+
+def _public_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
+    """Remove credential labels and account ids from app-facing metadata."""
+
+    public = {
+        key: attempt[key]
+        for key in (
+            "node_id",
+            "position",
+            "provider",
+            "model",
+            "duration_ms",
+            "outcome",
+            "fallback_taken",
+            "credential_refreshed",
+            "usage",
+        )
+        if key in attempt
+    }
+    error = attempt.get("error")
+    if isinstance(error, dict):
+        public_error = {
+            key: error[key]
+            for key in (
+                "category",
+                "code",
+                "type",
+                "retryable",
+                "upstream_status",
+            )
+            if key in error
+        }
+        message = error.get("message")
+        if isinstance(message, str):
+            public_error["message"] = _UUID_PATTERN.sub("[redacted-id]", message)
+        public["error"] = public_error
+    return public
 
 router = APIRouter(prefix="/v1", tags=["proxy"])
 
@@ -217,6 +284,63 @@ async def chat_completions(
     trace = await get_trace(session, correlation_id)
     content = response.model_dump(mode="json", exclude_none=True)
     if chat_request.gozar is not None and chat_request.gozar.include_metadata:
+        content["gozar"] = _gozar_extension(trace)
+    return JSONResponse(
+        status_code=200,
+        content=content,
+        headers={**_trace_headers(correlation_id), **_routing_headers(trace)},
+    )
+
+
+@router.post(
+    "/embeddings",
+    summary="OpenAI-compatible embeddings",
+    response_model=None,
+)
+async def embeddings(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> JSONResponse:
+    """Create real provider embeddings through a capability-aware fallback chain."""
+
+    correlation_id = uuid.uuid4()
+    request.state.gozar_trace_id = str(correlation_id)
+    presented_token = _bearer_token(request.headers.get("Authorization"))
+    session_id = request.headers.get(_SESSION_HEADER)
+
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001 - any decode failure is a client error
+        raise ValidationError("request body must be valid JSON") from exc
+
+    try:
+        embedding_request = OpenAIEmbeddingRequest.model_validate(payload)
+    except PydanticValidationError as exc:
+        raise ValidationError(
+            "invalid embeddings request",
+            details=exc.errors(include_url=False),
+        ) from exc
+
+    chain_override_id = _chain_override(
+        request.headers.get(_CHAIN_HEADER),
+        embedding_request.gozar.chain_id if embedding_request.gozar else None,
+    )
+    try:
+        response = await complete_embedding(
+            session,
+            presented_token=presented_token,
+            request=embedding_request,
+            session_id=session_id,
+            chain_override_id=chain_override_id,
+            correlation_id=correlation_id,
+        )
+    except GozarError:
+        await session.commit()
+        raise
+
+    trace = await get_trace(session, correlation_id)
+    content = response.model_dump(mode="json", exclude_none=True)
+    if embedding_request.gozar is not None and embedding_request.gozar.include_metadata:
         content["gozar"] = _gozar_extension(trace)
     return JSONResponse(
         status_code=200,

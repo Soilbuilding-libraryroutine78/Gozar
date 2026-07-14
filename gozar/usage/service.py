@@ -484,14 +484,17 @@ class InboundMeta:
     """Non-secret inbound request metadata for a Trace_Log entry (Requirement 14.1).
 
     Carries only the request-shape fields the console needs to show what came in:
-    the HTTP method, the requested model, whether streaming was requested, the
-    session-affinity id, and the inbound payload size. There is deliberately no field
+    the HTTP method, endpoint family, requested model, whether streaming was requested,
+    the session-affinity id, and the inbound payload size. There is deliberately no field
     for authorization material, so a secret cannot be traced (Requirement 16.4).
 
     Attributes
     ----------
     method:
         The inbound HTTP method (e.g. ``"POST"``).
+    endpoint:
+        Stable endpoint family (for example ``"chat.completions"`` or
+        ``"embeddings"``), without deployment host information.
     model:
         The requested model name, if any.
     stream:
@@ -503,6 +506,7 @@ class InboundMeta:
     """
 
     method: str
+    endpoint: str | None = None
     model: str | None = None
     stream: bool = False
     session_id: str | None = None
@@ -512,6 +516,8 @@ class InboundMeta:
     def as_meta(self) -> dict:
         """Render the non-secret metadata blob stored in ``inbound_meta``."""
         meta: dict = {"method": self.method, "stream": self.stream}
+        if self.endpoint is not None:
+            meta["endpoint"] = self.endpoint
         if self.model is not None:
             meta["model"] = self.model
         if self.session_id is not None:

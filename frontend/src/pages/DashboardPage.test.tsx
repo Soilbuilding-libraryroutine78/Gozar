@@ -54,7 +54,7 @@ const chain: ChainResponse = {
   chain_id: "chain-1",
   name: "Production route",
   model_selector: null,
-  entries: [{ account_id: "acct-1", position: 0, model: "gpt-5.5" }],
+  entries: [{ account_id: "acct-1", position: 0, model: "gpt-5.5", route: "chat" }],
 };
 
 const token: TokenResponse = {
@@ -84,6 +84,10 @@ const catalog: ModelCatalogResponse = {
   refreshed: false,
   model_count: 1,
   models: [{ id: "gpt-5.5", object: "model", owned_by: "codex" }],
+  embedding_model_count: 1,
+  embedding_models: [
+    { id: "text-embedding-3-small", object: "model", owned_by: "openai" },
+  ],
   accounts: [
     {
       account_id: account.account_id,
@@ -93,6 +97,10 @@ const catalog: ModelCatalogResponse = {
       status: account.status,
       model_count: 1,
       models: [{ id: "gpt-5.5", object: "model", owned_by: "codex" }],
+      embedding_model_count: 1,
+      embedding_models: [
+        { id: "text-embedding-3-small", object: "model", owned_by: "openai" },
+      ],
     },
   ],
   chains: [
@@ -101,8 +109,12 @@ const catalog: ModelCatalogResponse = {
       name: chain.name,
       model_selector: null,
       entry_count: 1,
+      chat_entry_count: 1,
+      embedding_entry_count: 0,
       model_count: 1,
       models: [{ id: "gpt-5.5", object: "model", owned_by: "codex" }],
+      embedding_model_count: 0,
+      embedding_models: [],
       health: "healthy",
       issues: [],
     },
@@ -143,8 +155,12 @@ describe("DashboardPage setup wizard and model catalog", () => {
     renderWithProviders(<DashboardPage />);
 
     expect(await screen.findByText("Bring Gozar online")).toBeInTheDocument();
-    expect(screen.getByText("Models available right now")).toBeInTheDocument();
+    expect(screen.getByText("LLM and embedding models available now")).toBeInTheDocument();
+    expect(
+      screen.getByText("1 LLM and 1 embedding model available from active routes."),
+    ).toBeInTheDocument();
     expect(await screen.findAllByText("gpt-5.5")).not.toHaveLength(0);
+    expect(await screen.findAllByText("text-embedding-3-small")).not.toHaveLength(0);
     expect(screen.getByText("Primary OpenAI")).toBeInTheDocument();
     expect(screen.getByText("Production route")).toBeInTheDocument();
   });

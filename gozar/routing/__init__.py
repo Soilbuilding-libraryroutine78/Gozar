@@ -18,6 +18,7 @@ Public surface:
 
 from gozar.routing.chains import (
     FallbackPolicy,
+    RouteKind,
     RoutingChain,
     RoutingTarget,
     evaluate_chain,
@@ -48,6 +49,7 @@ __all__ = [
     "RoutingChain",
     "RoutingTarget",
     "FallbackPolicy",
+    "RouteKind",
     "evaluate_chain",
     "get_attempt_order",
     "get_session_binding",

@@ -35,5 +35,8 @@ test.describe("operator login", () => {
     const nav = page.getByRole("navigation", { name: "Primary" });
     await expect(nav.getByRole("link", { name: "Accounts" })).toBeVisible();
     await expect(nav.getByRole("link", { name: "API keys" })).toBeVisible();
+    await expect(
+      page.getByLabel("Available embedding models").getByText("text-embedding-3-small"),
+    ).toBeVisible();
   });
 });

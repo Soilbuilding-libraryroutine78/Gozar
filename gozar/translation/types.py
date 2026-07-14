@@ -1,9 +1,9 @@
 """Shared Translation_Layer types and the ``ProviderAdapter`` protocol.
 
-The canonical inbound contract for Gozar is the OpenAI Chat Completions API
-(``POST /v1/chat/completions``) plus ``GET /v1/models``. Every Client_Application
-speaks this dialect, and the Translation_Layer is responsible for converting it
-to and from each upstream Provider's native shape (Requirement 7).
+The canonical inbound contracts for Gozar are OpenAI Chat Completions
+(``POST /v1/chat/completions``), Embeddings (``POST /v1/embeddings``), and model
+listing (``GET /v1/models``). The Translation_Layer converts provider-native chat
+shapes while embeddings remain OpenAI-compatible pass-through payloads.
 
 This module defines:
 
@@ -26,7 +26,7 @@ OpenAI shape, so the pass-through adapter uses these models directly.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -161,6 +161,53 @@ class OpenAIChatResponse(_OpenAIModel):
     usage: UsageCounts | None = Field(default=None)
 
 
+EmbeddingInput = str | list[str] | list[int] | list[list[int]]
+
+
+class OpenAIEmbeddingRequest(_OpenAIModel):
+    """An OpenAI-compatible ``POST /v1/embeddings`` request.
+
+    The provider-specific ``gozar`` routing extension is consumed by the gateway
+    and excluded from every upstream payload, just like the Chat Completions
+    extension.
+    """
+
+    model: str = Field(description="Embedding model identifier.")
+    input: EmbeddingInput = Field(
+        description="Text or token input, singular or batched."
+    )
+    encoding_format: Literal["float", "base64"] | None = Field(default=None)
+    dimensions: int | None = Field(default=None, gt=0)
+    user: str | None = Field(default=None)
+    gozar: GozarRoutingOptions | None = Field(default=None, exclude=True)
+
+
+class OpenAIEmbeddingData(_OpenAIModel):
+    """One vector in an OpenAI embeddings response."""
+
+    object: str = Field(default="embedding")
+    embedding: list[float] | str = Field(
+        description="Float vector, or a base64 string when requested."
+    )
+    index: int = Field(ge=0)
+
+
+class OpenAIEmbeddingUsage(_OpenAIModel):
+    """Input-token usage returned by an embeddings provider."""
+
+    prompt_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+
+
+class OpenAIEmbeddingResponse(_OpenAIModel):
+    """The OpenAI-compatible embeddings response envelope."""
+
+    object: str = Field(default="list")
+    data: list[OpenAIEmbeddingData] = Field(default_factory=list)
+    model: str
+    usage: OpenAIEmbeddingUsage
+
+
 class OpenAIStreamChoice(_OpenAIModel):
     """One choice in a streaming (SSE) chunk.
 
@@ -262,6 +309,11 @@ __all__ = [
     "OpenAIResponseChoice",
     "UsageCounts",
     "OpenAIChatResponse",
+    "EmbeddingInput",
+    "OpenAIEmbeddingRequest",
+    "OpenAIEmbeddingData",
+    "OpenAIEmbeddingUsage",
+    "OpenAIEmbeddingResponse",
     "OpenAIStreamChoice",
     "OpenAIStreamChunk",
     "OpenAIModelCard",

@@ -21,7 +21,7 @@ import {
 } from "../../components/icons";
 import { Spinner } from "../../components/Spinner";
 import { ROUTES } from "../../routes";
-import { providerLabel } from "../accounts/providers";
+import { providerLabel, providerSupportsEmbeddings } from "../accounts/providers";
 
 function messageFor(cause: unknown): string {
   if (cause instanceof ApiError) {
@@ -37,9 +37,11 @@ function modelIds(models: ReadonlyArray<ModelCardResponse>): ReadonlyArray<strin
 function ModelIdChipList({
   ids,
   limit = 8,
+  label = "Available models",
 }: {
   readonly ids: ReadonlyArray<string>;
   readonly limit?: number;
+  readonly label?: string;
 }): JSX.Element {
   if (ids.length === 0) {
     return <span className="model-chip-list__empty">No models advertised</span>;
@@ -47,7 +49,7 @@ function ModelIdChipList({
   const visible = ids.slice(0, limit);
   const overflow = ids.length - visible.length;
   return (
-    <ul className="model-chip-list" aria-label="Available models">
+    <ul className="model-chip-list" aria-label={label}>
       {visible.map((id) => (
         <li key={id} className="model-chip">
           {id}
@@ -61,11 +63,30 @@ function ModelIdChipList({
 function ModelChipList({
   models,
   limit = 8,
+  label = "Available models",
 }: {
   readonly models: ReadonlyArray<ModelCardResponse>;
   readonly limit?: number;
+  readonly label?: string;
 }): JSX.Element {
-  return <ModelIdChipList ids={modelIds(models)} limit={limit} />;
+  return <ModelIdChipList ids={modelIds(models)} limit={limit} label={label} />;
+}
+
+function RouteModelList({
+  label,
+  models,
+  limit = 5,
+}: {
+  readonly label: string;
+  readonly models: ReadonlyArray<ModelCardResponse>;
+  readonly limit?: number;
+}): JSX.Element {
+  return (
+    <div className="model-source-row__catalog">
+      <span className="model-source-row__catalog-label">{label}</span>
+      <ModelChipList models={models} limit={limit} label={`${label} models`} />
+    </div>
+  );
 }
 
 function accountStatusTone(status: string): "ok" | "warn" | "muted" {
@@ -104,9 +125,19 @@ function AccountModelRow({
             {accountStatusLabel(account.status)}
           </span>
         </span>
-        <ModelChipList models={account.models} limit={5} />
+        <div className="model-source-row__catalogs">
+          <RouteModelList label="LLM" models={account.models} />
+          {providerSupportsEmbeddings(account.provider) && (
+            <RouteModelList label="Embeddings" models={account.embedding_models} />
+          )}
+        </div>
       </span>
-      <span className="model-source-row__count">{account.model_count}</span>
+      <span className="model-source-row__side model-source-row__counts">
+        <span>{account.model_count} LLM</span>
+        {providerSupportsEmbeddings(account.provider) && (
+          <span>{account.embedding_model_count} Embed</span>
+        )}
+      </span>
     </li>
   );
 }
@@ -124,13 +155,18 @@ function ChainModelRow({
       <span className="model-source-row__main">
         <strong>{chain.name}</strong>
         <span>
-          {chain.entry_count} node{chain.entry_count === 1 ? "" : "s"}
+          {chain.chat_entry_count} LLM / {chain.embedding_entry_count} Embeddings
           {chain.model_selector ? ` - ${chain.model_selector}` : ""}
         </span>
         {chain.health !== "healthy" && chain.issues[0] && (
           <span className="model-source-row__issue">{chain.issues[0].message}</span>
         )}
-        <ModelChipList models={chain.models} limit={5} />
+        <div className="model-source-row__catalogs">
+          {chain.chat_entry_count > 0 && <RouteModelList label="LLM" models={chain.models} />}
+          {chain.embedding_entry_count > 0 && (
+            <RouteModelList label="Embeddings" models={chain.embedding_models} />
+          )}
+        </div>
       </span>
       <span className="model-source-row__side">
         <span
@@ -140,7 +176,12 @@ function ChainModelRow({
         >
           {chain.health === "healthy" ? "Healthy" : "Review"}
         </span>
-        <span className="model-source-row__count">{chain.model_count}</span>
+        <span className="model-source-row__counts">
+          <span>{chain.model_count} LLM</span>
+          {chain.embedding_entry_count > 0 && (
+            <span>{chain.embedding_model_count} Embed</span>
+          )}
+        </span>
       </span>
     </li>
   );
@@ -223,11 +264,11 @@ export function ModelCatalogPanel(): JSX.Element {
       <div className="model-catalog__head">
         <div>
           <p className="section-kicker">Model catalog</p>
-          <h2 id="model-catalog-title">Models available right now</h2>
+          <h2 id="model-catalog-title">LLM and embedding models available now</h2>
           <p>
-            Gozar builds this from active accounts and saved chains. Providers with
-            a live model endpoint refresh automatically; inactive or reconnect-needed
-            accounts stay visible but are not used for routing.
+            Gozar discovers each request type separately from active accounts and refreshes
+            the catalog automatically. Inactive or reconnect-needed accounts stay visible
+            but are not used for routing.
           </p>
         </div>
         <button
@@ -285,7 +326,11 @@ export function ModelCatalogPanel(): JSX.Element {
           <div className="model-catalog__summary">
             <div>
               <span>{catalog.model_count}</span>
-              <small>models</small>
+              <small>LLM models</small>
+            </div>
+            <div>
+              <span>{catalog.embedding_model_count}</span>
+              <small>embedding models</small>
             </div>
             <div>
               <span>{catalog.accounts.length}</span>
@@ -295,15 +340,20 @@ export function ModelCatalogPanel(): JSX.Element {
               <span>{catalog.chains.length}</span>
               <small>chains</small>
             </div>
-            <div>
-              <span>{catalog.refreshed ? "Live" : `${catalog.cache_ttl_seconds}s`}</span>
-              <small>{catalog.refreshed ? "refresh" : "cache TTL"}</small>
-            </div>
           </div>
 
           <div className="model-catalog__models">
-            <span className="model-catalog__label">Available now</span>
-            <ModelChipList models={catalog.models} />
+            <div className="model-catalog__model-lane">
+              <span className="model-catalog__label">LLM</span>
+              <ModelChipList models={catalog.models} label="Available LLM models" />
+            </div>
+            <div className="model-catalog__model-lane">
+              <span className="model-catalog__label">Embeddings</span>
+              <ModelChipList
+                models={catalog.embedding_models}
+                label="Available embedding models"
+              />
+            </div>
           </div>
 
           <details className="model-catalog-details">

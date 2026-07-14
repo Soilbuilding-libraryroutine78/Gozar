@@ -8,7 +8,7 @@ const routingChain: ChainResponse = {
   chain_id: "chain-prod-0001",
   name: "Production routing",
   model_selector: null,
-  entries: [{ account_id: "acc-openai-0001", position: 0 }],
+  entries: [{ account_id: "acc-openai-0001", position: 0, route: "chat" }],
 };
 
 /**
@@ -33,8 +33,9 @@ test.describe("create token", () => {
       new URL("/v1", window.location.origin).toString(),
     );
     await expect(page.getByText(`GOZAR_BASE_URL=${expectedBaseUrl}`)).toBeVisible();
-    await expect(page.getByText("GOZAR_MODEL=MODEL_FROM_V1_MODELS")).toBeVisible();
-    await expect(page.getByRole("tabpanel")).toContainText(
+    const examplePanel = page.getByRole("tabpanel");
+    await expect(examplePanel).toContainText("MODEL_FROM_V1_MODELS");
+    await expect(examplePanel).toContainText(
       `os.environ.setdefault("GOZAR_BASE_URL", "${expectedBaseUrl}")`,
     );
 
@@ -59,7 +60,10 @@ test.describe("create token", () => {
     await expect(row).toBeVisible();
     await expect(row.getByText("Production routing")).toBeVisible();
     await expect(row.getByText("Active")).toBeVisible();
-    await expect(page.getByText("GOZAR_MODEL=gpt-5.5")).toBeVisible();
+    await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5");
+    await expect(examplePanel).toContainText(
+      'os.environ.setdefault("GOZAR_MODEL", "gpt-5.5")',
+    );
     await expect(page.getByText(secret)).toHaveCount(0);
   });
 });

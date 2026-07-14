@@ -17,16 +17,29 @@ export interface ProviderOption {
   readonly label: string;
   /** How Gozar authenticates to this provider. */
   readonly authStyle: AuthStyle;
+  /** Whether this provider can serve the OpenAI-compatible Embeddings endpoint. */
+  readonly supportsEmbeddings: boolean;
 }
 
 export const PROVIDERS: ReadonlyArray<ProviderOption> = [
-  { id: "openai", label: "OpenAI", authStyle: "api_key" },
-  { id: "openrouter", label: "OpenRouter", authStyle: "api_key" },
-  { id: "codex", label: "Codex (ChatGPT subscription)", authStyle: "subscription_oauth" },
+  { id: "openai", label: "OpenAI", authStyle: "api_key", supportsEmbeddings: true },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    authStyle: "api_key",
+    supportsEmbeddings: true,
+  },
+  {
+    id: "codex",
+    label: "Codex (ChatGPT subscription)",
+    authStyle: "subscription_oauth",
+    supportsEmbeddings: false,
+  },
   {
     id: "anthropic",
     label: "Anthropic (Claude subscription)",
     authStyle: "subscription_oauth",
+    supportsEmbeddings: false,
   },
 ] as const;
 
@@ -43,4 +56,9 @@ export const SUBSCRIPTION_PROVIDERS: ReadonlyArray<ProviderOption> = PROVIDERS.f
 /** Human-readable provider name, falling back to the raw id when unknown. */
 export function providerLabel(id: string): string {
   return PROVIDERS.find((p) => p.id === id)?.label ?? id;
+}
+
+/** True when the provider can be used in an Embeddings chain lane. */
+export function providerSupportsEmbeddings(id: string): boolean {
+  return PROVIDERS.find((provider) => provider.id === id)?.supportsEmbeddings ?? false;
 }

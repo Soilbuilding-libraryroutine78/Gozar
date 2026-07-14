@@ -30,6 +30,12 @@ describe("DocumentationPage", () => {
 
     expect(screen.getByText(/llm\.invoke/)).toBeInTheDocument();
     expect(screen.getAllByText(/use_responses_api/).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("tab", { name: /embeddings python/i }));
+    const embeddingsBlock = screen
+      .getByText("OpenAI embeddings SDK through Gozar")
+      .closest(".docs-code");
+    expect(embeddingsBlock).toHaveTextContent("client.embeddings.create");
   });
 
   it("documents compatibility-safe opt-in routing metadata", async () => {

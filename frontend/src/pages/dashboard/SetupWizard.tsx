@@ -90,7 +90,9 @@ export function SetupWizard(): JSX.Element {
     const chains = snapshot?.chains ?? [];
     const tokens = snapshot?.tokens ?? [];
     const traces = snapshot?.traces ?? [];
-    const modelCount = snapshot?.catalog.model_count ?? 0;
+    const llmModelCount = snapshot?.catalog.model_count ?? 0;
+    const embeddingModelCount = snapshot?.catalog.embedding_model_count ?? 0;
+    const modelCount = llmModelCount + embeddingModelCount;
 
     return [
       {
@@ -112,7 +114,9 @@ export function SetupWizard(): JSX.Element {
       {
         title: "Sync available models",
         description: modelCount
-          ? `${modelCount} model${modelCount === 1 ? "" : "s"} available from active routes.`
+          ? `${llmModelCount} LLM and ${embeddingModelCount} embedding model${
+              embeddingModelCount === 1 ? "" : "s"
+            } available from active routes.`
           : "Connect an account or refresh the catalog after adding provider access.",
         complete: modelCount > 0,
         Icon: RefreshIcon,

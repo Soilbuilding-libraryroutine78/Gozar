@@ -14,6 +14,7 @@ import pytest
 
 from gozar.routing import (
     CredentialState,
+    RouteKind,
     RoutingChain,
     RoutingTarget,
     evaluate_chain,
@@ -193,6 +194,30 @@ async def test_get_session_binding_none_when_absent_or_malformed() -> None:
 
     await redis.set("route:session:bad", "not-a-uuid")
     assert await get_session_binding("bad", redis=redis) is None
+
+
+async def test_session_affinity_is_isolated_between_request_lanes() -> None:
+    redis = FakeRedis()
+    chat_account = uuid.uuid4()
+    embedding_account = uuid.uuid4()
+
+    await record_session_binding("shared", chat_account, redis=redis)
+    await record_session_binding(
+        "shared",
+        embedding_account,
+        redis=redis,
+        route_kind=RouteKind.EMBEDDINGS,
+    )
+
+    assert await get_session_binding("shared", redis=redis) == chat_account
+    assert (
+        await get_session_binding(
+            "shared",
+            redis=redis,
+            route_kind=RouteKind.EMBEDDINGS,
+        )
+        == embedding_account
+    )
 
 
 async def test_get_attempt_order_applies_session_affinity_from_redis() -> None:

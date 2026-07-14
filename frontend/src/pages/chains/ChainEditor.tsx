@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import {
   Background,
   Controls,
@@ -21,17 +28,19 @@ import {
 import { Spinner } from "../../components/Spinner";
 import type {
   AccountResponse,
+  ChainRoute,
   ChainResponse,
   FallbackPolicy,
 } from "../../api/types";
 import { statusView } from "../accounts/format";
-import { providerLabel } from "../accounts/providers";
+import { providerLabel, providerSupportsEmbeddings } from "../accounts/providers";
 import { entryAvailability } from "./format";
 
 export interface ChainDraftEntry {
   readonly account_id: string;
   readonly model: string | null;
   readonly fallback_policy: FallbackPolicy;
+  readonly route: ChainRoute;
 }
 
 export interface ChainDraft {
@@ -40,10 +49,16 @@ export interface ChainDraft {
   readonly model_selector: string | null;
 }
 
+export interface AccountRouteModels {
+  readonly chat: ReadonlyArray<string>;
+  readonly embeddings: ReadonlyArray<string>;
+}
+
 type ChainFlowNode = Node<{ readonly label: ReactNode }>;
 type ChainFlowInstance = ReactFlowInstance<ChainFlowNode, Edge>;
 
 const FLOW_FIT_OPTIONS = { padding: 0.24 } as const;
+const MANUAL_MODEL_VALUE = "__manual_model__";
 
 function makeFlowLabel({
   eyebrow,
@@ -80,35 +95,50 @@ export function ChainEditor({
   readonly initial: ChainResponse | null;
   readonly accounts: ReadonlyArray<AccountResponse>;
   readonly accountsById: ReadonlyMap<string, AccountResponse>;
-  readonly modelsByAccount: ReadonlyMap<string, ReadonlyArray<string>>;
+  readonly modelsByAccount: ReadonlyMap<string, AccountRouteModels>;
   readonly submitting: boolean;
   readonly error: string | null;
   readonly onSubmit: (draft: ChainDraft) => void;
 }): JSX.Element {
   const [name, setName] = useState(initial?.name ?? "");
   const [modelSelector] = useState(initial?.model_selector ?? "");
-  const [entries, setEntries] = useState<ReadonlyArray<ChainDraftEntry>>(() =>
+  const [allEntries, setAllEntries] = useState<ReadonlyArray<ChainDraftEntry>>(() =>
     initial
       ? [...initial.entries]
-          .sort((a, b) => a.position - b.position)
+          .sort((a, b) => {
+            const routeOrder = (a.route ?? "chat").localeCompare(b.route ?? "chat");
+            return routeOrder === 0 ? a.position - b.position : routeOrder;
+          })
           .map((entry) => ({
             account_id: entry.account_id,
             model: entry.model?.trim() || null,
             fallback_policy: entry.fallback_policy ?? "any_error",
+            route: entry.route ?? "chat",
           }))
       : [],
   );
+  const [activeRoute, setActiveRoute] = useState<ChainRoute>("chat");
   const [picked, setPicked] = useState("");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(
-    initial?.entries[0]?.account_id ?? null,
+    initial?.entries.find((entry) => (entry.route ?? "chat") === "chat")?.account_id ?? null,
   );
   const [flowInstance, setFlowInstance] = useState<ChainFlowInstance | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [manualModelKey, setManualModelKey] = useState<string | null>(null);
 
+  const entries = useMemo(
+    () => allEntries.filter((entry) => entry.route === activeRoute),
+    [activeRoute, allEntries],
+  );
   const entryIds = useMemo(() => entries.map((entry) => entry.account_id), [entries]);
   const addable = useMemo(
-    () => accounts.filter((account) => !entryIds.includes(account.account_id)),
-    [accounts, entryIds],
+    () =>
+      accounts.filter(
+        (account) =>
+          !entryIds.includes(account.account_id) &&
+          (activeRoute === "chat" || providerSupportsEmbeddings(account.provider)),
+      ),
+    [accounts, activeRoute, entryIds],
   );
   const selectedIndex = selectedEntryId
     ? entries.findIndex((entry) => entry.account_id === selectedEntryId)
@@ -121,8 +151,39 @@ export function ChainEditor({
     ? entryAvailability(selectedEntry.account_id, accountsById)
     : null;
   const selectedModels = selectedEntry
-    ? modelsByAccount.get(selectedEntry.account_id) ?? []
+    ? modelsByAccount.get(selectedEntry.account_id)?.[activeRoute] ?? []
     : [];
+  const selectedEntryKey = selectedEntry
+    ? `${activeRoute}:${selectedEntry.account_id}`
+    : null;
+  const selectedModelIsDiscovered =
+    selectedEntry !== null &&
+    selectedEntry.model !== null &&
+    selectedModels.includes(selectedEntry.model);
+  const manualModelActive =
+    selectedEntryKey !== null &&
+    (manualModelKey === selectedEntryKey ||
+      (selectedEntry?.model !== null && !selectedModelIsDiscovered));
+
+  function setEntries(action: SetStateAction<ReadonlyArray<ChainDraftEntry>>): void {
+    setAllEntries((current) => {
+      const lane = current.filter((entry) => entry.route === activeRoute);
+      const nextLane = typeof action === "function" ? action(lane) : action;
+      return [
+        ...current.filter((entry) => entry.route !== activeRoute),
+        ...nextLane.map((entry) => ({ ...entry, route: activeRoute })),
+      ];
+    });
+  }
+
+  function selectRoute(route: ChainRoute): void {
+    setActiveRoute(route);
+    setPicked("");
+    setFlowInstance(null);
+    setSelectedEntryId(
+      allEntries.find((entry) => entry.route === route)?.account_id ?? null,
+    );
+  }
 
   function moveEntry(index: number, delta: number): void {
     const target = index + delta;
@@ -151,10 +212,15 @@ export function ChainEditor({
     if (picked === "" || entryIds.includes(picked)) {
       return;
     }
-    const defaultModel = modelsByAccount.get(picked)?.[0] ?? null;
+    const defaultModel = modelsByAccount.get(picked)?.[activeRoute][0] ?? null;
     setEntries([
       ...entries,
-      { account_id: picked, model: defaultModel, fallback_policy: "any_error" },
+      {
+        account_id: picked,
+        model: defaultModel,
+        fallback_policy: "any_error",
+        route: activeRoute,
+      },
     ]);
     setSelectedEntryId(picked);
     setPicked("");
@@ -170,6 +236,18 @@ export function ChainEditor({
         entry.account_id === selectedEntry.account_id ? { ...entry, model } : entry,
       ),
     );
+  }
+
+  function selectSuggestedModel(value: string): void {
+    if (selectedEntryKey === null) {
+      return;
+    }
+    if (value === MANUAL_MODEL_VALUE) {
+      setManualModelKey(selectedEntryKey);
+      return;
+    }
+    setManualModelKey((current) => (current === selectedEntryKey ? null : current));
+    updateSelectedModel(value);
   }
 
   function updateSelectedPolicy(fallbackPolicy: FallbackPolicy): void {
@@ -193,18 +271,18 @@ export function ChainEditor({
       setLocalError("Enter a name for the chain.");
       return;
     }
-    if (entries.length === 0) {
-      setLocalError("Add at least one account to the chain.");
+    if (allEntries.length === 0) {
+      setLocalError("Add at least one node to the LLM or Embeddings route.");
       return;
     }
     onSubmit({
       name: trimmedName,
-      entries,
+      entries: allEntries,
       model_selector: normalizedModel(modelSelector),
     });
   }
 
-  const chainLabel = modelSelector.trim() || "API key route";
+  const chainLabel = activeRoute === "chat" ? "POST /chat/completions" : "POST /embeddings";
   const flowLayoutKey = `${entries
     .map((entry) => `${entry.account_id}:${entry.model ?? "request"}`)
     .join("|")}::${chainLabel}`;
@@ -237,7 +315,11 @@ export function ChainEditor({
         type: "input",
         position: { x: 0, y: baseY },
         data: {
-          label: makeFlowLabel({ eyebrow: "Input", title: "LLM call", meta: chainLabel }),
+          label: makeFlowLabel({
+            eyebrow: "Input",
+            title: activeRoute === "chat" ? "LLM call" : "Embedding input",
+            meta: chainLabel,
+          }),
         },
         className: "chain-flow-node chain-flow-node--system",
       },
@@ -249,14 +331,14 @@ export function ChainEditor({
         data: {
           label: makeFlowLabel({
             eyebrow: "Result",
-            title: "First success",
+            title: activeRoute === "chat" ? "Completion" : "Vector response",
             meta: "Stops fallback",
           }),
         },
         className: "chain-flow-node chain-flow-node--system",
       },
     ];
-  }, [accountsById, chainLabel, entries, selectedEntryId]);
+  }, [accountsById, activeRoute, chainLabel, entries, selectedEntryId]);
 
   const flowEdges = useMemo<Edge[]>(() => {
     const nodeIds = ["request", ...entryIds, "complete"];
@@ -321,11 +403,42 @@ export function ChainEditor({
         </div>
       </div>
 
+      <div className="chain-route-tabs" role="tablist" aria-label="Chain request route">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeRoute === "chat"}
+          className={activeRoute === "chat" ? "chain-route-tab chain-route-tab--active" : "chain-route-tab"}
+          onClick={() => selectRoute("chat")}
+        >
+          <span>LLM</span>
+          <small>{allEntries.filter((entry) => entry.route === "chat").length} nodes</small>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeRoute === "embeddings"}
+          className={
+            activeRoute === "embeddings"
+              ? "chain-route-tab chain-route-tab--active"
+              : "chain-route-tab"
+          }
+          onClick={() => selectRoute("embeddings")}
+        >
+          <span>Embeddings</span>
+          <small>
+            {allEntries.filter((entry) => entry.route === "embeddings").length} nodes
+          </small>
+        </button>
+      </div>
+
       <fieldset className="chain-entries" disabled={submitting}>
         <legend className="chain-entries__legend">
-          Routing path
+          {activeRoute === "chat" ? "LLM route" : "Embeddings route"}
           <span className="chain-entries__hint">
-            Each step owns its provider account and model. Failures continue downward.
+            {activeRoute === "chat"
+              ? "Chat Completions uses this order."
+              : "Embedding requests use this order."}
           </span>
         </legend>
 
@@ -334,7 +447,11 @@ export function ChainEditor({
             {entries.length === 0 ? (
               <div className="chain-entries__empty">
                 <InboxIcon size={22} aria-hidden />
-                <p>Add the primary account to begin.</p>
+                <p>
+                  {activeRoute === "chat"
+                    ? "Add the primary LLM account."
+                    : "Add an OpenAI or OpenRouter account."}
+                </p>
               </div>
             ) : (
               <ReactFlow
@@ -366,7 +483,7 @@ export function ChainEditor({
             {selectedEntry === null || selectedAvailability === null ? (
               <>
                 <h3>No node selected</h3>
-                <p>Add an account, then choose the exact model used at that step.</p>
+                <p>Add an account, then select its provider model.</p>
               </>
             ) : (
               <>
@@ -374,7 +491,9 @@ export function ChainEditor({
                   <div>
                     <h3>{selectedAvailability.label}</h3>
                     <p>
-                      Step {selectedIndex + 1} - {selectedIndex === 0 ? "Primary" : "Fallback"}
+                      {activeRoute === "chat" ? "LLM" : "Embedding"} step {selectedIndex + 1}
+                      {" - "}
+                      {selectedIndex === 0 ? "Primary" : "Fallback"}
                     </p>
                   </div>
                   <span
@@ -405,28 +524,59 @@ export function ChainEditor({
 
                 <div className="field chain-node-model-field">
                   <label htmlFor="chain-node-model">Model for this node</label>
-                  <input
-                    id="chain-node-model"
-                    list="chain-node-model-options"
-                    value={selectedEntry.model ?? ""}
-                    onChange={(event) => updateSelectedModel(event.target.value)}
-                    placeholder="Use request model"
-                    autoComplete="off"
-                  />
-                  <datalist id="chain-node-model-options">
-                    {selectedModels.map((model) => (
-                      <option key={model} value={model} />
-                    ))}
-                  </datalist>
-                  <p className="field__hint">
-                    Choose a listed model or enter an exact provider model ID. Leave blank to pass
-                    through the request model.
-                  </p>
-                  {selectedModels.length === 0 && (
-                    <p className="chain-node-model-field__warning">
-                      No models are currently advertised for this account. Manual IDs are still
-                      accepted and will be checked on the next catalog refresh.
-                    </p>
+                  {selectedModels.length > 0 ? (
+                    <>
+                      <select
+                        id="chain-node-model"
+                        value={
+                          manualModelActive
+                            ? MANUAL_MODEL_VALUE
+                            : selectedEntry.model ?? ""
+                        }
+                        onChange={(event) => selectSuggestedModel(event.target.value)}
+                      >
+                        <option value="">Use model sent by client</option>
+                        {selectedModels.map((model) => (
+                          <option key={model} value={model}>
+                            {model}
+                          </option>
+                        ))}
+                        <option value={MANUAL_MODEL_VALUE}>Enter model ID manually...</option>
+                      </select>
+                      <p className="field__hint">
+                        {selectedModels.length} {activeRoute === "chat" ? "LLM" : "embedding"}
+                        {selectedModels.length === 1 ? " model" : " models"} discovered from this
+                        account and refreshed automatically.
+                      </p>
+                      {manualModelActive && (
+                        <div className="chain-node-model-field__manual">
+                          <label htmlFor="chain-node-model-manual">Manual model ID</label>
+                          <input
+                            id="chain-node-model-manual"
+                            value={selectedEntry.model ?? ""}
+                            onChange={(event) => updateSelectedModel(event.target.value)}
+                            placeholder="provider/model-id"
+                            autoComplete="off"
+                          />
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        id="chain-node-model"
+                        value={selectedEntry.model ?? ""}
+                        onChange={(event) => updateSelectedModel(event.target.value)}
+                        placeholder={
+                          activeRoute === "chat" ? "Use request model" : "Embedding model ID"
+                        }
+                        autoComplete="off"
+                      />
+                      <p className="chain-node-model-field__warning">
+                        No {activeRoute === "chat" ? "LLM" : "embedding"} models are currently
+                        advertised for this account. Manual IDs remain available.
+                      </p>
+                    </>
                   )}
                 </div>
 
@@ -532,7 +682,11 @@ export function ChainEditor({
               onChange={(event) => setPicked(event.target.value)}
             >
               <option value="">
-                {addable.length === 0 ? "No more accounts to add" : "Select an account..."}
+                {addable.length === 0
+                  ? activeRoute === "embeddings"
+                    ? "No compatible account available"
+                    : "No more accounts to add"
+                  : "Select an account..."}
               </option>
               {addable.map((account) => (
                 <option key={account.account_id} value={account.account_id}>

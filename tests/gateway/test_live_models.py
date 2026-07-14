@@ -18,19 +18,25 @@ from gozar.accounts.models import CredentialKind
 from gozar.accounts.service import ProviderCredentialMaterial
 from gozar.core.config import Settings
 from gozar.gateway.live_models import fetch_live_models
+from gozar.routing.chains import RouteKind
 
 
 def _settings() -> Settings:
     return Settings(
-        provider_base_urls={"openai": "https://api.openai.com/v1"},
+        provider_base_urls={
+            "openai": "https://api.openai.com/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
+        },
         upstream_max_attempts=1,
     )
 
 
-def _material(api_key: str | None = "sk-real") -> ProviderCredentialMaterial:
+def _material(
+    api_key: str | None = "sk-real", *, provider: str = "openai"
+) -> ProviderCredentialMaterial:
     return ProviderCredentialMaterial(
         account_id=uuid.uuid4(),
-        provider="openai",
+        provider=provider,
         kind=CredentialKind.API_KEY,
         access_token=None,
         api_key=api_key,
@@ -58,7 +64,11 @@ async def test_returns_model_ids_on_success(monkeypatch):
             200,
             json={
                 "object": "list",
-                "data": [{"id": "gpt-5.5", "object": "model"}, {"id": "gpt-5.5-mini"}],
+                "data": [
+                    {"id": "gpt-5.5", "object": "model"},
+                    {"id": "gpt-5.5-mini"},
+                    {"id": "text-embedding-3-small"},
+                ],
             },
         )
 
@@ -66,6 +76,66 @@ async def test_returns_model_ids_on_success(monkeypatch):
 
     result = await fetch_live_models("openai", _material(), settings=_settings())
     assert result == ["gpt-5.5", "gpt-5.5-mini"]
+
+
+async def test_openai_embedding_models_are_discovered_from_live_listing(monkeypatch):
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/models"
+        assert request.url.query == b""
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "gpt-5.5"},
+                    {"id": "text-embedding-3-small"},
+                    {"id": "text-embedding-3-large"},
+                ],
+            },
+        )
+
+    _mock_transport(_handler, monkeypatch)
+
+    result = await fetch_live_models(
+        "openai",
+        _material(),
+        route_kind=RouteKind.EMBEDDINGS,
+        settings=_settings(),
+    )
+
+    assert result == ["text-embedding-3-small", "text-embedding-3-large"]
+
+
+async def test_openrouter_requests_embedding_output_models(monkeypatch):
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/models"
+        assert request.url.params["output_modalities"] == "embeddings"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "openai/text-embedding-3-small",
+                        "architecture": {"output_modalities": ["embeddings"]},
+                    },
+                    {
+                        "id": "openai/gpt-5.4-mini",
+                        "architecture": {"output_modalities": ["text"]},
+                    },
+                ]
+            },
+        )
+
+    _mock_transport(_handler, monkeypatch)
+
+    result = await fetch_live_models(
+        "openrouter",
+        _material(provider="openrouter"),
+        route_kind=RouteKind.EMBEDDINGS,
+        settings=_settings(),
+    )
+
+    assert result == ["openai/text-embedding-3-small"]
 
 
 async def test_returns_none_without_an_api_key():

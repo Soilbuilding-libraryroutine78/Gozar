@@ -10,11 +10,12 @@ Routing *decisions* stay pure and live in :mod:`gozar.routing.chains` /
 :mod:`gozar.routing.state`; this module only persists and reads chains. All functions
 operate on a caller-supplied :class:`~sqlalchemy.ext.asyncio.AsyncSession`.
 
-A chain is stored as a parent row plus one entry row per credential, ordered by a
-contiguous ``position`` starting at ``0`` (Requirement 10.1). Editing the entry order
+A chain is stored as a parent row plus one entry row per credential. Each request
+lane has a contiguous ``position`` starting at ``0`` (Requirement 10.1). Editing
+the entry order
 replaces the chain's entries atomically (old rows deleted, new rows inserted in the
-requested order) so the ``(chain_id, position)`` uniqueness constraint never sees a
-transient collision and the updated chain applies to subsequent requests
+requested order) so the lane-scoped uniqueness constraint never sees a transient
+collision and the updated chain applies to subsequent requests
 (Requirement 10.4). Entries may reference soft-deleted credentials; persistence keeps
 them and the pure evaluation layer skips them (Requirements 11.2, 11.4).
 """
@@ -25,11 +26,11 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gozar.core.errors import NotFound
-from gozar.routing.chains import FallbackPolicy, RoutingChain, RoutingTarget
+from gozar.routing.chains import FallbackPolicy, RouteKind, RoutingChain, RoutingTarget
 from gozar.routing.models import RouteFallbackChain, RouteFallbackChainEntry
 
 
@@ -54,6 +55,7 @@ class ChainEntryInput:
     account_id: uuid.UUID
     model_id: str | None = None
     fallback_policy: FallbackPolicy = FallbackPolicy.ANY_ERROR
+    route_kind: RouteKind = RouteKind.CHAT
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class ChainEntryView:
     position: int
     model_id: str | None = None
     fallback_policy: FallbackPolicy = FallbackPolicy.ANY_ERROR
+    route_kind: RouteKind = RouteKind.CHAT
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,7 @@ def _normalize_entries(
                     entry.account_id,
                     model_id or None,
                     entry.fallback_policy,
+                    entry.route_kind,
                 )
             )
         else:
@@ -118,7 +122,10 @@ async def _ordered_entries(
     result = await session.scalars(
         select(RouteFallbackChainEntry)
         .where(RouteFallbackChainEntry.chain_id == chain_id)
-        .order_by(RouteFallbackChainEntry.position)
+        .order_by(
+            case((RouteFallbackChainEntry.route_kind == RouteKind.CHAT.value, 0), else_=1),
+            RouteFallbackChainEntry.position,
+        )
     )
     return list(result.all())
 
@@ -131,8 +138,8 @@ async def _replace_entries(
     """Replace a chain's entries with ``account_ids`` at contiguous positions.
 
     Existing entries are deleted and flushed before the new rows are inserted so the
-    ``(chain_id, position)`` unique constraint never observes a transient duplicate
-    during a reorder.
+    lane-scoped position constraint never observes a transient duplicate during a
+    reorder.
     """
     await session.execute(
         delete(RouteFallbackChainEntry).where(
@@ -141,7 +148,10 @@ async def _replace_entries(
     )
     # Flush the deletes before inserting so reused positions don't collide.
     await session.flush()
-    for position, entry in enumerate(_normalize_entries(entries)):
+    positions = {route_kind: 0 for route_kind in RouteKind}
+    for entry in _normalize_entries(entries):
+        position = positions[entry.route_kind]
+        positions[entry.route_kind] += 1
         session.add(
             RouteFallbackChainEntry(
                 chain_id=chain_id,
@@ -149,6 +159,7 @@ async def _replace_entries(
                 account_id=entry.account_id,
                 model_id=entry.model_id,
                 fallback_policy=entry.fallback_policy.value,
+                route_kind=entry.route_kind.value,
             )
         )
     await session.flush()
@@ -171,6 +182,7 @@ def _to_view(
                 fallback_policy=FallbackPolicy(
                     entry.fallback_policy or FallbackPolicy.ANY_ERROR.value
                 ),
+                route_kind=RouteKind(entry.route_kind),
             )
             for entry in entries
         ),
@@ -187,8 +199,8 @@ async def create_chain(
 ) -> ChainView:
     """Create a Fallback_Chain with ``account_ids`` as its ordered entries.
 
-    Entries are assigned contiguous positions starting at ``0`` in the given order
-    (Requirement 10.1). Returns the persisted chain as a :class:`ChainView`.
+    Entries are assigned contiguous positions starting at ``0`` independently in
+    each request lane. Returns the persisted chain as a :class:`ChainView`.
     """
     chain = RouteFallbackChain(
         name=name,
@@ -301,8 +313,8 @@ async def load_routing_chain(
 ) -> RoutingChain:
     """Map a persisted chain into the pure :class:`RoutingChain` value object.
 
-    Reads the chain's entries in ascending ``position`` and builds the ordered tuple
-    of credential ids the Proxy_Gateway feeds to
+    Reads Chat first and Embeddings second, preserving each lane's ascending
+    ``position``, and builds the targets the Proxy_Gateway filters by endpoint before
     :func:`gozar.routing.chains.evaluate_chain`. This is the single seam between
     persistence and the pure routing logic (the evaluation layer never touches the
     database).
@@ -317,6 +329,7 @@ async def load_routing_chain(
                 fallback_policy=FallbackPolicy(
                     entry.fallback_policy or FallbackPolicy.ANY_ERROR.value
                 ),
+                route_kind=RouteKind(entry.route_kind),
                 node_id=entry.id,
                 position=entry.position,
             )

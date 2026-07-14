@@ -20,6 +20,7 @@ type DocsSection = "overview" | "setup" | "chains" | "langgraph" | "api" | "ops"
 type ExampleId =
   | "curl"
   | "python"
+  | "embeddingsPython"
   | "typescript"
   | "langchainPython"
   | "langgraphPython"
@@ -127,6 +128,7 @@ export function DocumentationPage(): JSX.Element {
       env: `export GOZAR_BASE_URL="${apiBaseUrl}"
 export GOZAR_API_KEY="gz-YOUR_GOZAR_API_KEY"
 export GOZAR_MODEL="MODEL_FROM_V1_MODELS"
+export GOZAR_EMBEDDING_MODEL="PROVIDER_EMBEDDING_MODEL"
 export GOZAR_CHAIN_ID="OPTIONAL_CHAIN_UUID"`,
       firstCurl: `curl "$GOZAR_BASE_URL/chat/completions" \\
   -H "Authorization: Bearer $GOZAR_API_KEY" \\
@@ -139,6 +141,14 @@ export GOZAR_CHAIN_ID="OPTIONAL_CHAIN_UUID"`,
   }'`,
       models: `curl "$GOZAR_BASE_URL/models" \\
   -H "Authorization: Bearer $GOZAR_API_KEY"`,
+      embeddings: `curl "$GOZAR_BASE_URL/embeddings" \\
+  -H "Authorization: Bearer $GOZAR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "'"$GOZAR_EMBEDDING_MODEL"'",
+    "input": ["first document", "second document"],
+    "encoding_format": "float"
+  }'`,
       upsert: `curl -X PUT "${baseUrl}/api/chains/by-key/support-production" \\
   -H "Authorization: Bearer $GOZAR_ADMIN_ACCESS_TOKEN" \\
   -H "Content-Type: application/json" \\
@@ -147,13 +157,21 @@ export GOZAR_CHAIN_ID="OPTIONAL_CHAIN_UUID"`,
     "entries": [
       {
         "account_id": "OPENAI_ACCOUNT_ID",
-        "model": "gpt-5.6",
-        "fallback_policy": "auth_or_retryable"
+        "model": "PRIMARY_CHAT_MODEL_ID",
+        "fallback_policy": "auth_or_retryable",
+        "route": "chat"
       },
       {
         "account_id": "OPENROUTER_ACCOUNT_ID",
-        "model": "google/gemini-2.5-flash",
-        "fallback_policy": "retryable"
+        "model": "OPENROUTER_CHAT_MODEL_ID",
+        "fallback_policy": "retryable",
+        "route": "chat"
+      },
+      {
+        "account_id": "OPENROUTER_ACCOUNT_ID",
+        "model": "OPENROUTER_EMBEDDING_MODEL_ID",
+        "fallback_policy": "retryable",
+        "route": "embeddings"
       }
     ]
   }'`,
@@ -221,6 +239,29 @@ response = client.chat.completions.create(
 )
 
 print(response.choices[0].message.content)`,
+      },
+      {
+        id: "embeddingsPython",
+        label: "Embeddings Python",
+        summary: "Real vectors for RAG and memory.",
+        title: "OpenAI embeddings SDK through Gozar",
+        language: "python",
+        code: `import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url=os.environ["GOZAR_BASE_URL"],
+    api_key=os.environ["GOZAR_API_KEY"],
+)
+
+response = client.embeddings.create(
+    model=os.environ["GOZAR_EMBEDDING_MODEL"],
+    input=["first document", "second document"],
+    encoding_format="float",
+)
+
+vectors = [item.embedding for item in response.data]
+print(len(vectors), len(vectors[0]))`,
       },
       {
         id: "typescript",
@@ -411,7 +452,7 @@ const graph = new StateGraph(MessagesAnnotation)
                 <div>
                   <ChainIcon size={20} />
                   <strong>Chain</strong>
-                  <span>Ordered nodes with exact provider model IDs and fallback policy.</span>
+                  <span>Independent LLM and Embeddings paths under one stable chain ID.</span>
                 </div>
                 <div>
                   <TokenIcon size={20} />
@@ -451,6 +492,7 @@ const graph = new StateGraph(MessagesAnnotation)
                 <DocsCodeBlock title="Environment" language="shell" code={snippets.env} />
               </div>
               <DocsCodeBlock title="Chat Completions" language="shell" code={snippets.firstCurl} />
+              <DocsCodeBlock title="Embeddings for RAG" language="shell" code={snippets.embeddings} />
             </>
           )}
 
@@ -480,7 +522,7 @@ const graph = new StateGraph(MessagesAnnotation)
                   <ChainIcon size={20} />
                   <div>
                     <strong>Create a chain</strong>
-                    <span>Choose account, exact model, fallback policy, and order for every node.</span>
+                    <span>Configure the LLM path and an optional Embeddings path.</span>
                   </div>
                   <Link to={ROUTES.chains}>Chains</Link>
                 </li>
@@ -500,6 +542,7 @@ const graph = new StateGraph(MessagesAnnotation)
                     <li><code>GOZAR_BASE_URL</code> ending in <code>/v1</code>.</li>
                     <li><code>GOZAR_API_KEY</code> created in the API keys page.</li>
                     <li><code>GOZAR_MODEL</code> selected from <code>GET /v1/models</code>.</li>
+                    <li><code>GOZAR_EMBEDDING_MODEL</code> from an OpenAI or OpenRouter account.</li>
                     <li>Optional <code>GOZAR_CHAIN_ID</code> for per-call overrides.</li>
                   </ul>
                 </div>
@@ -519,15 +562,32 @@ const graph = new StateGraph(MessagesAnnotation)
 
           {active === "chains" && (
             <>
-              <SectionHeading number="03" title="Provider-aware fallback chains">
-                A chain node is not just a provider. It is provider account, exact model, and fallback rule.
+              <SectionHeading number="03" title="Two request paths, one chain">
+                The request endpoint selects the LLM or Embeddings path automatically. The API key keeps one chain ID.
               </SectionHeading>
               <div className="docs-callout">
                 <AlertIcon size={20} />
                 <p>
-                  Models are provider-scoped. An OpenAI model list and an OpenRouter model list are
-                  different catalogs, so every fallback node stores its own model ID.
+                  LLM and embedding models are provider-scoped. Every node stores its own model ID,
+                  so each fallback can use a different provider without changing application code.
                 </p>
+              </div>
+
+              <div className="docs-grid">
+                <div className="docs-panel">
+                  <h3>LLM path</h3>
+                  <p>
+                    Used only by <code>POST /v1/chat/completions</code>. A subscription can be
+                    primary and an API-key provider can use its own chat model as fallback.
+                  </p>
+                </div>
+                <div className="docs-panel">
+                  <h3>Embeddings path</h3>
+                  <p>
+                    Used only by <code>POST /v1/embeddings</code>. Add OpenAI or OpenRouter nodes
+                    and select the exact embedding model for each provider.
+                  </p>
+                </div>
               </div>
 
               <h3>Routing precedence</h3>
@@ -589,9 +649,9 @@ const graph = new StateGraph(MessagesAnnotation)
               <div className="docs-callout docs-callout--info">
                 <ExternalLinkIcon size={20} />
                 <p>
-                  Gozar currently exposes an OpenAI-compatible Chat Completions surface. In
-                  LangChain Python, keep <code>use_responses_api=False</code> when you need to
-                  force ChatOpenAI onto that endpoint family.
+                  Chat calls use the selected chain's LLM path. Embeddings use its separate
+                  Embeddings path and accept OpenAI or OpenRouter API-key accounts. In LangChain Python, keep
+                  <code> use_responses_api=False</code> when ChatOpenAI must use Chat Completions.
                 </p>
               </div>
             </>
@@ -607,6 +667,7 @@ const graph = new StateGraph(MessagesAnnotation)
                   <thead><tr><th>Surface</th><th>Endpoint</th><th>Auth</th><th>Use</th></tr></thead>
                   <tbody>
                     <tr><td>Chat</td><td><code>POST /v1/chat/completions</code></td><td>Gozar API key</td><td>LLM calls from apps.</td></tr>
+                    <tr><td>Embeddings</td><td><code>POST /v1/embeddings</code></td><td>Gozar API key</td><td>Real vectors for RAG, search, and memory.</td></tr>
                     <tr><td>Models</td><td><code>GET /v1/models</code></td><td>Gozar API key</td><td>Models reachable by that API key route.</td></tr>
                     <tr><td>Chains</td><td><code>GET|POST /api/chains</code></td><td>Operator token</td><td>Create and edit visual fallback chains.</td></tr>
                     <tr><td>Stable chain</td><td><code>PUT /api/chains/by-key/:key</code></td><td>Operator token</td><td>Idempotent chain automation.</td></tr>
@@ -617,8 +678,9 @@ const graph = new StateGraph(MessagesAnnotation)
               </div>
               <div className="docs-grid">
                 <DocsCodeBlock title="Model list" language="shell" code={snippets.models} />
-                <DocsCodeBlock title="Console route test" language="shell" code={snippets.routeTest} />
+                <DocsCodeBlock title="Embeddings" language="shell" code={snippets.embeddings} />
               </div>
+              <DocsCodeBlock title="Console route test" language="shell" code={snippets.routeTest} />
               <p className="docs-footnote">
                 The <code>/v1</code> base URL is for app traffic. The <code>/api</code> surface is
                 operator control-plane traffic and should not be embedded in end-user apps.
@@ -662,9 +724,11 @@ const graph = new StateGraph(MessagesAnnotation)
               <div className="docs-panel docs-panel--split">
                 <div>
                   <p>
-                    Normal responses keep the OpenAI Chat Completions shape unchanged. Read
+                    Normal responses keep the OpenAI Chat Completions or Embeddings shape unchanged. Read
                     <code> x-request-id</code> or <code>x-gozar-trace-id</code> from the HTTP
                     response and inspect that request in Traces.
+                    The <code>x-gozar-route</code> header reports <code>chat</code> or
+                    <code> embeddings</code>.
                   </p>
                   <p>
                     Raw HTTP clients can opt in to a top-level <code>gozar</code> extension.

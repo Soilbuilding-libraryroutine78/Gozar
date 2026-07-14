@@ -8,7 +8,8 @@ import pytest
 
 from gozar.accounts.models import CredentialKind, CredentialStatus, UpstreamCredential
 from gozar.accounts.service import connect_api_key
-from gozar.routing.service import create_chain
+from gozar.routing.chains import RouteKind
+from gozar.routing.service import ChainEntryInput, create_chain
 
 
 async def _accept_key(entry, api_key):  # noqa: ANN001
@@ -35,7 +36,19 @@ async def _seed_catalog(sessionmaker, settings) -> None:
         session.add(codex)
         await session.flush()
         await create_chain(session, "codex-only", [codex.id])
-        await create_chain(session, "mixed-route", [openai.id, codex.id])
+        await create_chain(
+            session,
+            "mixed-route",
+            [
+                openai.id,
+                codex.id,
+                ChainEntryInput(
+                    openai.id,
+                    "text-embedding-3-small",
+                    route_kind=RouteKind.EMBEDDINGS,
+                ),
+            ],
+        )
         await session.commit()
 
 
@@ -84,6 +97,8 @@ def test_model_catalog_groups_models_by_account_and_chain(
     async def _fake_live_models(provider, material, **kwargs):  # noqa: ANN001
         assert provider == "openai"
         assert material.api_key == "sk-test-openai"
+        if kwargs["route_kind"] is RouteKind.EMBEDDINGS:
+            return ["text-embedding-3-small"]
         return ["gpt-live", "gpt-live-mini"]
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake_live_models)
@@ -101,11 +116,15 @@ def test_model_catalog_groups_models_by_account_and_chain(
     body = resp.json()
     assert body["refreshed"] is False
     assert body["model_count"] == 4
+    assert body["embedding_model_count"] == 1
     assert [model["id"] for model in body["models"]] == [
         "gpt-live",
         "gpt-live-mini",
         "gpt-5.5",
         "gpt-5.4-mini",
+    ]
+    assert [model["id"] for model in body["embedding_models"]] == [
+        "text-embedding-3-small"
     ]
 
     accounts = {account["label"]: account for account in body["accounts"]}
@@ -113,10 +132,14 @@ def test_model_catalog_groups_models_by_account_and_chain(
         "gpt-live",
         "gpt-live-mini",
     ]
+    assert [
+        model["id"] for model in accounts["Primary OpenAI"]["embedding_models"]
+    ] == ["text-embedding-3-small"]
     assert [model["id"] for model in accounts["Codex subscription"]["models"]] == [
         "gpt-5.5",
         "gpt-5.4-mini",
     ]
+    assert accounts["Codex subscription"]["embedding_models"] == []
 
     chains = {chain["name"]: chain for chain in body["chains"]}
     assert [model["id"] for model in chains["codex-only"]["models"]] == [
@@ -129,6 +152,11 @@ def test_model_catalog_groups_models_by_account_and_chain(
         "gpt-5.5",
         "gpt-5.4-mini",
     ]
+    assert chains["mixed-route"]["chat_entry_count"] == 2
+    assert chains["mixed-route"]["embedding_entry_count"] == 1
+    assert [
+        model["id"] for model in chains["mixed-route"]["embedding_models"]
+    ] == ["text-embedding-3-small"]
 
 
 def test_model_catalog_refresh_query_reaches_live_listing(
@@ -140,10 +168,13 @@ def test_model_catalog_refresh_query_reaches_live_listing(
 ):
     import gozar.gateway.catalog as catalog_module
 
-    calls: list[str] = []
+    calls: list[tuple[str, RouteKind]] = []
 
     async def _fake_live_models(provider, material, **kwargs):  # noqa: ANN001
-        calls.append(provider)
+        route_kind = kwargs["route_kind"]
+        calls.append((provider, route_kind))
+        if route_kind is RouteKind.EMBEDDINGS:
+            return ["text-embedding-refreshed"]
         return ["gpt-refreshed"]
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake_live_models)
@@ -158,7 +189,8 @@ def test_model_catalog_refresh_query_reaches_live_listing(
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["refreshed"] is True
-    assert "openai" in calls
+    assert ("openai", RouteKind.CHAT) in calls
+    assert ("openai", RouteKind.EMBEDDINGS) in calls
 
 
 def test_model_catalog_keeps_live_models_scoped_to_each_api_key(
@@ -172,8 +204,13 @@ def test_model_catalog_keeps_live_models_scoped_to_each_api_key(
 
     async def _fake_live_models(provider, material, **kwargs):  # noqa: ANN001
         assert provider == "openrouter"
+        route_kind = kwargs["route_kind"]
         if material.api_key == "sk-openrouter-team-a":
+            if route_kind is RouteKind.EMBEDDINGS:
+                return ["openai/text-embedding-3-small"]
             return ["openai/gpt-5.4-mini"]
+        if route_kind is RouteKind.EMBEDDINGS:
+            return ["google/gemini-embedding-001"]
         return ["google/gemini-2.5-flash"]
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake_live_models)
@@ -189,6 +226,12 @@ def test_model_catalog_keeps_live_models_scoped_to_each_api_key(
     assert [model["id"] for model in accounts["OpenRouter team B"]["models"]] == [
         "google/gemini-2.5-flash"
     ]
+    assert [
+        model["id"] for model in accounts["OpenRouter team A"]["embedding_models"]
+    ] == ["openai/text-embedding-3-small"]
+    assert [
+        model["id"] for model in accounts["OpenRouter team B"]["embedding_models"]
+    ] == ["google/gemini-embedding-001"]
     assert [model["id"] for model in response.json()["models"]] == [
         "openai/gpt-5.4-mini",
         "google/gemini-2.5-flash",
@@ -206,6 +249,8 @@ def test_provider_model_catalog_update_changes_admin_catalog_without_restart(
 
     async def _fake_live_models(provider, material, **kwargs):  # noqa: ANN001
         assert provider == "openai"
+        if kwargs["route_kind"] is RouteKind.EMBEDDINGS:
+            return ["text-embedding-3-small"]
         return ["gpt-live"]
 
     monkeypatch.setattr(catalog_module, "fetch_live_models", _fake_live_models)

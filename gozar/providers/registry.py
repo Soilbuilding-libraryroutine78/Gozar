@@ -119,6 +119,7 @@ class _ProviderSpec:
     auth_style: AuthStyle
     adapter_kind: AdapterKind
     model_listing_path: str | None = None
+    embeddings_path: str | None = None
 
 
 # Structural definition of the supported Providers. Base URLs and OAuth metadata
@@ -129,11 +130,13 @@ _PROVIDER_SPECS: dict[ProviderId, _ProviderSpec] = {
         AuthStyle.API_KEY,
         AdapterKind.OPENAI_COMPAT,
         "/models",
+        "/embeddings",
     ),
     ProviderId.OPENROUTER: _ProviderSpec(
         AuthStyle.API_KEY,
         AdapterKind.OPENAI_COMPAT,
         "/models",
+        "/embeddings",
     ),
     ProviderId.CODEX: _ProviderSpec(AuthStyle.SUBSCRIPTION_OAUTH, AdapterKind.CODEX),
     ProviderId.ANTHROPIC: _ProviderSpec(
@@ -263,6 +266,7 @@ class ProviderEntry:
     adapter_kind: AdapterKind
     oauth: OAuthEndpointMetadata | None
     model_listing_path: str | None
+    embeddings_path: str | None
 
     @property
     def is_subscription(self) -> bool:
@@ -423,6 +427,7 @@ def _build_entry(
         adapter_kind=spec.adapter_kind,
         oauth=oauth,
         model_listing_path=spec.model_listing_path,
+        embeddings_path=spec.embeddings_path,
     )
 
 
@@ -465,3 +470,9 @@ def list_providers(settings: Settings | None = None) -> list[ProviderEntry]:
 def supported_provider_ids() -> tuple[ProviderId, ...]:
     """Return all Provider ids the registry knows how to build, regardless of config."""
     return tuple(_PROVIDER_SPECS.keys())
+
+
+def provider_supports_embeddings(provider_id: str | ProviderId) -> bool:
+    """Return whether the provider exposes the OpenAI-compatible embeddings lane."""
+
+    return _PROVIDER_SPECS[coerce_provider_id(provider_id)].embeddings_path is not None

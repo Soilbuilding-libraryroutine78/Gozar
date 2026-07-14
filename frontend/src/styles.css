@@ -925,11 +925,27 @@ a:hover {
 
 .model-catalog__models {
   display: grid;
-  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0.85rem;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
+}
+
+.model-catalog__model-lane {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  gap: 0.5rem;
+  padding: 0 0.85rem;
+}
+
+.model-catalog__model-lane:first-child {
+  padding-left: 0;
+}
+
+.model-catalog__model-lane + .model-catalog__model-lane {
+  border-left: 1px solid var(--border);
 }
 
 .model-catalog-details {
@@ -1191,6 +1207,25 @@ a:hover {
   overflow-wrap: anywhere;
 }
 
+.model-source-row__catalogs {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.2rem;
+}
+
+.model-source-row__catalog {
+  display: grid;
+  min-width: 0;
+  gap: 0.28rem;
+}
+
+.model-source-row__catalog-label {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .model-source-row__meta {
   display: flex;
   align-items: center;
@@ -1209,6 +1244,13 @@ a:hover {
   display: grid;
   justify-items: end;
   gap: 0.45rem;
+}
+
+.model-source-row__counts {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .model-source-row__issue {
@@ -1428,6 +1470,23 @@ a:hover {
 
   .page-guide__steps {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .model-catalog__models {
+    grid-template-columns: 1fr;
+  }
+
+  .model-catalog__model-lane {
+    padding: 0;
+  }
+
+  .model-catalog__model-lane + .model-catalog__model-lane {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+    border-left: 0;
   }
 }
 
@@ -2510,6 +2569,58 @@ a:hover {
   gap: 0.9rem;
 }
 
+.chain-route-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 30rem);
+  margin: 0.15rem 0 0.25rem;
+  padding: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.chain-route-tab {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.7rem;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chain-route-tab:hover {
+  color: var(--text);
+}
+
+.chain-route-tab--active {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+}
+
+.chain-route-tab span {
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-route-tab small {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: 0.72rem;
+}
+
 .chain-designer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(13rem, 0.3fr);
@@ -2673,8 +2784,20 @@ a:hover {
   border-top: 1px solid var(--border);
 }
 
-.chain-node-model-field input {
+.chain-node-model-field input,
+.chain-node-model-field select {
   font-family: var(--font-mono);
+}
+
+.chain-node-model-field__manual {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.chain-node-model-field__manual label {
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
 }
 
 .chain-node-model-field__warning {
@@ -2812,6 +2935,41 @@ a:hover {
   flex: 1;
 }
 
+.chain-card__lanes {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.chain-card__lane {
+  display: grid;
+  min-width: 0;
+  gap: 0.55rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.chain-card__lane-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.chain-card__lane-head strong {
+  font-size: 0.84rem;
+}
+
+.chain-card__lane-head span,
+.chain-card__lane-empty {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.chain-card__lane-empty {
+  margin: 0;
+  padding: 0.4rem 0;
+}
+
 @media (max-width: 840px) {
   .chain-editor-grid,
   .chain-designer {
@@ -2830,6 +2988,16 @@ a:hover {
 @media (max-width: 560px) {
   .chain-entries {
     padding: 0.85rem;
+  }
+
+  .chain-route-tabs {
+    width: 100%;
+  }
+
+  .chain-route-tab {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.05rem;
   }
 
   .chain-waterfall {

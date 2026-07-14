@@ -8,6 +8,8 @@ from uuid import UUID
 
 from gozar.accounts.models import CredentialStatus
 from gozar.accounts.service import AccountView
+from gozar.providers.registry import provider_supports_embeddings
+from gozar.routing.chains import RouteKind
 from gozar.routing.service import ChainView
 
 
@@ -20,6 +22,7 @@ class ChainHealthIssue:
     position: int | None = None
     account_id: UUID | None = None
     model_id: str | None = None
+    route_kind: RouteKind | None = None
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,8 @@ class ChainHealth:
 def assess_chain_health(
     chain: ChainView,
     accounts: Mapping[UUID, AccountView],
-    models_by_account: Mapping[UUID, frozenset[str]],
+    chat_models_by_account: Mapping[UUID, frozenset[str]],
+    embedding_models_by_account: Mapping[UUID, frozenset[str]] | None = None,
 ) -> ChainHealth:
     """Assess a chain without I/O using current account/model snapshots."""
 
@@ -52,15 +56,20 @@ def assess_chain_health(
     usable_nodes = 0
     for entry in chain.entries:
         step = entry.position + 1
+        route_label = "Embedding" if entry.route_kind is RouteKind.EMBEDDINGS else "LLM"
         account = accounts.get(entry.account_id)
         if account is None:
             issues.append(
                 ChainHealthIssue(
                     code="account_missing",
-                    message=f"Step {step} references an account that no longer exists.",
+                    message=(
+                        f"{route_label} step {step} references an account that no "
+                        "longer exists."
+                    ),
                     position=entry.position,
                     account_id=entry.account_id,
                     model_id=entry.model_id,
+                    route_kind=entry.route_kind,
                 )
             )
             continue
@@ -69,16 +78,42 @@ def assess_chain_health(
                 ChainHealthIssue(
                     code="account_unavailable",
                     message=(
-                        f"Step {step} uses {account.label}, which is "
+                        f"{route_label} step {step} uses {account.label}, which is "
                         f"{account.status.value.replace('_', ' ')}."
                     ),
                     position=entry.position,
                     account_id=entry.account_id,
                     model_id=entry.model_id,
+                    route_kind=entry.route_kind,
                 )
             )
             continue
 
+        if (
+            entry.route_kind is RouteKind.EMBEDDINGS
+            and not provider_supports_embeddings(account.provider)
+        ):
+            issues.append(
+                ChainHealthIssue(
+                    code="route_unsupported",
+                    message=(
+                        f"Embedding step {step} uses {account.label}, but "
+                        f"{account.provider} does not provide embeddings."
+                    ),
+                    position=entry.position,
+                    account_id=entry.account_id,
+                    model_id=entry.model_id,
+                    route_kind=entry.route_kind,
+                )
+            )
+            continue
+
+        models_by_account = (
+            embedding_models_by_account
+            if entry.route_kind is RouteKind.EMBEDDINGS
+            and embedding_models_by_account is not None
+            else chat_models_by_account
+        )
         model_ids = models_by_account.get(entry.account_id, frozenset())
         if entry.model_id is None:
             usable_nodes += 1
@@ -87,11 +122,13 @@ def assess_chain_health(
                     ChainHealthIssue(
                         code="dynamic_fallback_model",
                         message=(
-                            f"Step {step} reuses the request model; choose a {account.provider} "
+                            f"{route_label} step {step} reuses the request model; choose a "
+                            f"{account.provider} "
                             "model when the providers expose different model ids."
                         ),
                         position=entry.position,
                         account_id=entry.account_id,
+                        route_kind=entry.route_kind,
                     )
                 )
             continue
@@ -102,12 +139,14 @@ def assess_chain_health(
                 ChainHealthIssue(
                     code="catalog_unavailable",
                     message=(
-                        f"Step {step} uses {entry.model_id}, but {account.provider} did not "
+                        f"{route_label} step {step} uses {entry.model_id}, but "
+                        f"{account.provider} did not "
                         "advertise a model catalog to verify it."
                     ),
                     position=entry.position,
                     account_id=entry.account_id,
                     model_id=entry.model_id,
+                    route_kind=entry.route_kind,
                 )
             )
             continue
@@ -117,12 +156,14 @@ def assess_chain_health(
                 ChainHealthIssue(
                     code="model_unavailable",
                     message=(
-                        f"Step {step} model {entry.model_id} is no longer advertised by "
+                        f"{route_label} step {step} model {entry.model_id} is no longer "
+                        "advertised by "
                         f"{account.label}."
                     ),
                     position=entry.position,
                     account_id=entry.account_id,
                     model_id=entry.model_id,
+                    route_kind=entry.route_kind,
                 )
             )
             continue

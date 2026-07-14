@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Sequence
+from typing import Protocol
 
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -47,9 +48,10 @@ from gozar.core.config import Settings, get_settings
 from gozar.core.errors import NotFound
 from gozar.core.logging import get_logger
 from gozar.core.redis import get_redis
-from gozar.gateway.live_models import fetch_live_models
+from gozar.gateway.live_models import fetch_live_models, filter_model_ids_for_route
 from gozar.providers.model_catalog import get_provider_model_ids
-from gozar.providers.registry import get_provider
+from gozar.providers.registry import get_provider, provider_supports_embeddings
+from gozar.routing.chains import RouteKind
 from gozar.routing.service import get_chain
 from gozar.tokens.models import ClientToken
 from gozar.translation.types import OpenAIModelCard, OpenAIModelList
@@ -62,17 +64,27 @@ _logger = get_logger(__name__)
 # ``RefreshFn`` injection seams in :mod:`gozar.accounts.service`). Defaults to
 # :func:`gozar.gateway.live_models.fetch_live_models`; tests inject a fake so the
 # catalog never makes a real network call.
-LiveModelsFetcher = Callable[
-    [str, ProviderCredentialMaterial], Awaitable[list[str] | None]
-]
+class LiveModelsFetcher(Protocol):
+    """Injectable operation-aware provider model listing."""
+
+    def __call__(
+        self,
+        provider: str,
+        material: ProviderCredentialMaterial,
+        *,
+        route_kind: RouteKind,
+    ) -> Awaitable[list[str] | None]: ...
 
 # Redis key namespace for the cached live model listing. The key includes both
 # provider and credential id because different API keys for the same provider can
 # have different model access (OpenRouter orgs, OpenAI project scoping, etc.).
-_CACHE_KEY_PREFIX = "gw:models_cache:"
+_CACHE_KEY_PREFIX = "gw:models_cache:v2:"
 
-def _cache_key(provider: str, account_id: uuid.UUID) -> str:
-    return f"{_CACHE_KEY_PREFIX}{provider}:{account_id}"
+
+def _cache_key(
+    provider: str, account_id: uuid.UUID, route_kind: RouteKind
+) -> str:
+    return f"{_CACHE_KEY_PREFIX}{route_kind.value}:{provider}:{account_id}"
 
 
 async def _cached_live_models(
@@ -83,6 +95,7 @@ async def _cached_live_models(
     redis: Redis | None,
     settings: Settings,
     fetch_live: LiveModelsFetcher,
+    route_kind: RouteKind,
     refresh: bool = False,
 ) -> list[str] | None:
     """Return a Provider's live model ids, using the Redis cache when fresh.
@@ -95,7 +108,7 @@ async def _cached_live_models(
     the catalog rather than failing it.
     """
     ttl = settings.provider_models_cache_ttl_seconds
-    key = _cache_key(provider, account_id)
+    key = _cache_key(provider, account_id, route_kind)
 
     if redis is not None and ttl > 0 and not refresh:
         try:
@@ -113,7 +126,7 @@ async def _cached_live_models(
                 pass  # Corrupt cache entry; fall through and re-fetch live.
 
     material = await get_usable_token(session, account_id, settings=settings)
-    model_ids = await fetch_live(provider, material)
+    model_ids = await fetch_live(provider, material, route_kind=route_kind)
     if model_ids is None:
         return None
 
@@ -135,6 +148,7 @@ async def list_available_models(
     redis: Redis | None = None,
     fetch_live: LiveModelsFetcher | None = None,
     account_ids: Sequence[uuid.UUID] | None = None,
+    route_kind: RouteKind = RouteKind.CHAT,
     refresh: bool = False,
 ) -> OpenAIModelList:
     """Return the OpenAI-shaped models listing for currently reachable Providers.
@@ -155,8 +169,11 @@ async def list_available_models(
             # lookup below is simply re-fetched each call.
             redis = None
     fetch = fetch_live or (
-        lambda provider, material: fetch_live_models(
-            provider, material, settings=settings
+        lambda provider, material, *, route_kind: fetch_live_models(
+            provider,
+            material,
+            route_kind=route_kind,
+            settings=settings,
         )
     )
     accounts = await list_accounts(session)
@@ -174,6 +191,11 @@ async def list_available_models(
     for account in accounts:
         if account.status is not CredentialStatus.ACTIVE:
             continue
+        if (
+            route_kind is RouteKind.EMBEDDINGS
+            and not provider_supports_embeddings(account.provider)
+        ):
+            continue
 
         model_ids: list[str] | None = None
         provider_entry = get_provider(account.provider, settings=settings)
@@ -188,12 +210,14 @@ async def list_available_models(
                 redis=redis,
                 settings=settings,
                 fetch_live=fetch,
+                route_kind=route_kind,
                 refresh=refresh,
             )
         if model_ids is None:
             model_ids = await get_provider_model_ids(
                 session, account.provider, settings=settings
             )
+            model_ids = filter_model_ids_for_route(model_ids, route_kind)
 
         for model_id in model_ids:
             if model_id in seen:
@@ -245,7 +269,11 @@ async def list_available_models_for_token(
         settings=settings,
         redis=redis,
         fetch_live=fetch_live,
-        account_ids=[entry.account_id for entry in chain.entries],
+        account_ids=[
+            entry.account_id
+            for entry in chain.entries
+            if entry.route_kind is RouteKind.CHAT
+        ],
         refresh=refresh,
     )
 

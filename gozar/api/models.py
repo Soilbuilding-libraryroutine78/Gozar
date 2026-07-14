@@ -32,6 +32,7 @@ from gozar.providers.model_catalog import (
     set_provider_model_catalog,
 )
 from gozar.routing.service import list_chains
+from gozar.routing.chains import RouteKind
 from gozar.routing.health import assess_chain_health
 from gozar.translation.types import OpenAIModelCard
 
@@ -82,14 +83,25 @@ async def list_model_catalog_route(
     account_responses: list[ModelCatalogAccountResponse] = []
     account_models: dict[uuid.UUID, frozenset[str]] = {}
     account_cards: dict[uuid.UUID, list[OpenAIModelCard]] = {}
+    embedding_account_models: dict[uuid.UUID, frozenset[str]] = {}
+    embedding_account_cards: dict[uuid.UUID, list[OpenAIModelCard]] = {}
     for account in account_views:
-        listing = await list_available_models(
+        chat_listing = await list_available_models(
             session,
             settings=settings,
             account_ids=[account.account_id],
+            route_kind=RouteKind.CHAT,
             refresh=refresh,
         )
-        account_cards[account.account_id] = list(listing.data)
+        embedding_listing = await list_available_models(
+            session,
+            settings=settings,
+            account_ids=[account.account_id],
+            route_kind=RouteKind.EMBEDDINGS,
+            refresh=refresh,
+        )
+        account_cards[account.account_id] = list(chat_listing.data)
+        embedding_account_cards[account.account_id] = list(embedding_listing.data)
         account_responses.append(
             ModelCatalogAccountResponse(
                 account_id=account.account_id,
@@ -97,14 +109,24 @@ async def list_model_catalog_route(
                 provider=account.provider,
                 kind=account.kind.value,
                 status=account.status.value,
-                model_count=len(listing.data),
-                models=listing.data,
+                model_count=len(chat_listing.data),
+                models=chat_listing.data,
+                embedding_model_count=len(embedding_listing.data),
+                embedding_models=embedding_listing.data,
             )
         )
-        account_models[account.account_id] = frozenset(model.id for model in listing.data)
+        account_models[account.account_id] = frozenset(
+            model.id for model in chat_listing.data
+        )
+        embedding_account_models[account.account_id] = frozenset(
+            model.id for model in embedding_listing.data
+        )
 
     global_models = _merge_model_cards(
         [account_cards[account.account_id] for account in account_views]
+    )
+    global_embedding_models = _merge_model_cards(
+        [embedding_account_cards[account.account_id] for account in account_views]
     )
 
     accounts_by_id = {account.account_id: account for account in account_views}
@@ -112,19 +134,47 @@ async def list_model_catalog_route(
     chain_views = await list_chains(session)
     chain_responses: list[ModelCatalogChainResponse] = []
     for chain in chain_views:
-        account_ids = [entry.account_id for entry in chain.entries]
+        account_ids = [
+            entry.account_id
+            for entry in chain.entries
+            if entry.route_kind is RouteKind.CHAT
+        ]
+        embedding_account_ids = [
+            entry.account_id
+            for entry in chain.entries
+            if entry.route_kind is RouteKind.EMBEDDINGS
+        ]
         chain_models = _merge_model_cards(
             [account_cards.get(account_id, []) for account_id in account_ids]
         )
-        health = assess_chain_health(chain, accounts_by_id, account_models)
+        chain_embedding_models = _merge_model_cards(
+            [
+                embedding_account_cards.get(account_id, [])
+                for account_id in embedding_account_ids
+            ]
+        )
+        health = assess_chain_health(
+            chain,
+            accounts_by_id,
+            account_models,
+            embedding_account_models,
+        )
         chain_responses.append(
             ModelCatalogChainResponse(
                 chain_id=chain.chain_id,
                 name=chain.name,
                 model_selector=chain.model_selector,
                 entry_count=len(chain.entries),
+                chat_entry_count=sum(
+                    entry.route_kind is RouteKind.CHAT for entry in chain.entries
+                ),
+                embedding_entry_count=sum(
+                    entry.route_kind is RouteKind.EMBEDDINGS for entry in chain.entries
+                ),
                 model_count=len(chain_models),
                 models=chain_models,
+                embedding_model_count=len(chain_embedding_models),
+                embedding_models=chain_embedding_models,
                 health=health.status,
                 issues=[
                     ChainIssueResponse(
@@ -133,6 +183,7 @@ async def list_model_catalog_route(
                         position=issue.position,
                         account_id=issue.account_id,
                         model=issue.model_id,
+                        route=issue.route_kind,
                     )
                     for issue in health.issues
                 ],
@@ -149,6 +200,8 @@ async def list_model_catalog_route(
         refreshed=refresh,
         model_count=len(global_models),
         models=global_models,
+        embedding_model_count=len(global_embedding_models),
+        embedding_models=global_embedding_models,
         accounts=account_responses,
         chains=chain_responses,
         providers=provider_responses,

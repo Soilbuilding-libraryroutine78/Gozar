@@ -19,8 +19,10 @@ from gozar.core.errors import UpstreamError
 from gozar.accounts.service import connect_api_key
 from gozar.app import create_app
 from gozar.core.db import get_session
+from gozar.gateway import embeddings as embeddings_module
 from gozar.gateway import pipeline as pipeline_module
-from gozar.routing.service import create_chain
+from gozar.routing.chains import RouteKind
+from gozar.routing.service import ChainEntryInput, create_chain
 from gozar.tokens.service import create_token
 from gozar.usage.models import UsageRecord
 
@@ -70,7 +72,17 @@ async def seeded(sessionmaker, settings):
             settings=settings,
             validate=_noop_validate,
         )
-        chain = await create_chain(session, "default", [credential.id])
+        chain = await create_chain(
+            session,
+            "default",
+            [
+                ChainEntryInput(credential.id),
+                ChainEntryInput(
+                    credential.id,
+                    route_kind=RouteKind.EMBEDDINGS,
+                ),
+            ],
+        )
         await session.commit()
         return {
             "secret": issued.secret,
@@ -95,11 +107,31 @@ def client(sessionmaker, settings, redis, monkeypatch):
     # the upstream provider call so no network is touched.
     monkeypatch.setattr(pipeline_module, "get_settings", lambda: settings)
     monkeypatch.setattr(pipeline_module, "get_redis", lambda: redis)
+    monkeypatch.setattr(embeddings_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(embeddings_module, "get_redis", lambda: redis)
 
     async def _fake_call_upstream(entry, material, adapter, body, *, settings=None):
         return openai_response(content="routed")
 
     monkeypatch.setattr(pipeline_module, "call_upstream", _fake_call_upstream)
+
+    async def _fake_call_upstream_embeddings(
+        entry, material, body, *, settings=None
+    ):
+        return {
+            "object": "list",
+            "data": [
+                {"object": "embedding", "embedding": [0.25, -0.5], "index": 0}
+            ],
+            "model": body.model,
+            "usage": {"prompt_tokens": 4, "total_tokens": 4},
+        }
+
+    monkeypatch.setattr(
+        embeddings_module,
+        "call_upstream_embeddings",
+        _fake_call_upstream_embeddings,
+    )
 
     async def _fake_call_upstream_stream(entry, material, adapter, body, *, settings=None):
         for raw in _openai_sse_bytes(content="routed"):
@@ -121,6 +153,14 @@ def _body(stream: bool = False) -> dict:
     }
 
 
+def _embedding_body() -> dict:
+    return {
+        "model": "text-embedding-3-small",
+        "input": "hello",
+        "encoding_format": "float",
+    }
+
+
 def test_missing_token_returns_openai_auth_error(client):
     resp = client.post("/v1/chat/completions", json=_body())
     assert resp.status_code == 401
@@ -139,6 +179,54 @@ def test_invalid_json_body_returns_400(client):
     )
     assert resp.status_code == 400
     assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_embeddings_missing_token_returns_openai_auth_error(client):
+    resp = client.post("/v1/embeddings", json=_embedding_body())
+
+    assert resp.status_code == 401
+    assert resp.json()["error"]["type"] == "authentication_error"
+    assert resp.headers["x-request-id"] == resp.headers["x-gozar-trace-id"]
+
+
+def test_embeddings_round_trip_is_openai_compatible(client, seeded):
+    resp = client.post(
+        "/v1/embeddings",
+        json=_embedding_body(),
+        headers={"Authorization": f"Bearer {seeded['secret']}"},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "embedding": [0.25, -0.5], "index": 0}
+        ],
+        "model": "text-embedding-3-small",
+        "usage": {"prompt_tokens": 4, "total_tokens": 4},
+    }
+    assert resp.headers["x-gozar-provider"] == "openai"
+    assert resp.headers["x-gozar-model"] == "text-embedding-3-small"
+    assert resp.headers["x-gozar-route"] == "embeddings"
+
+
+def test_opt_in_metadata_does_not_expose_credential_identity(client, seeded):
+    resp = client.post(
+        "/v1/embeddings",
+        json={**_embedding_body(), "gozar": {"include_metadata": True}},
+        headers={"Authorization": f"Bearer {seeded['secret']}"},
+    )
+
+    assert resp.status_code == 200
+    encoded = resp.text
+    assert "sk-real-key" not in encoded
+    assert "router-token" not in encoded
+    assert str(seeded["account_id"]) not in encoded
+    attempt = resp.json()["gozar"]["routing"]["attempts"][0]
+    assert attempt["provider"] == "openai"
+    assert "account_id" not in attempt
+    assert "credential" not in attempt
 
 
 def test_conflicting_header_and_body_chain_overrides_return_400(client, seeded):
@@ -224,6 +312,7 @@ def test_end_to_end_round_trip(client, seeded, sessionmaker):
     assert resp.headers["x-gozar-node-position"] == "0"
     assert resp.headers["x-gozar-attempt-count"] == "1"
     assert resp.headers["x-gozar-provider"] == "openai"
+    assert resp.headers["x-gozar-route"] == "chat"
     assert resp.headers["x-gozar-model"] == "gpt-4o"
 
 
@@ -245,6 +334,9 @@ def test_opt_in_namespaced_metadata_keeps_standard_response_fields(client, seede
     assert routing["attempt_count"] == 1
     assert routing["attempts"][0]["outcome"] == "success"
     assert routing["attempts"][0]["usage"]["total_tokens"] == 18
+    assert "account_id" not in routing["attempts"][0]
+    assert "credential" not in routing["attempts"][0]
+    assert str(seeded["account_id"]) not in resp.text
 
 
 async def test_end_to_end_records_usage(client, seeded, sessionmaker):

@@ -94,6 +94,17 @@ function configuredModelsForProvider(provider: string): ReadonlyArray<string> {
   return models[provider] ?? [`${provider}-model`];
 }
 
+function configuredEmbeddingModelsForProvider(provider: string): ReadonlyArray<string> {
+  const models: Record<string, ReadonlyArray<string>> = {
+    openai: ["text-embedding-3-small", "text-embedding-3-large"],
+    openrouter: [
+      "openai/text-embedding-3-small",
+      "google/gemini-embedding-001",
+    ],
+  };
+  return models[provider] ?? [];
+}
+
 function defaultProviderCatalogs(): Record<string, ProviderModelCatalogResponse> {
   return Object.fromEntries(
     ["anthropic", "codex", "openai", "openrouter"].map((provider) => {
@@ -129,13 +140,17 @@ function normalizeModelIds(modelIds: ReadonlyArray<string>): ReadonlyArray<strin
 function modelsForAccount(
   account: AccountResponse,
   providerCatalogs: Record<string, ProviderModelCatalogResponse>,
+  route: "chat" | "embeddings" = "chat",
 ): ReadonlyArray<ModelCardResponse> {
   if (account.status !== "active") {
     return [];
   }
   const created = Math.floor(Date.parse(account.connected_at) / 1000);
-  const fallback = providerCatalogs[account.provider]?.models;
-  return (fallback ?? configuredModelsForProvider(account.provider)).map((id) => ({
+  const fallback =
+    route === "embeddings"
+      ? configuredEmbeddingModelsForProvider(account.provider)
+      : providerCatalogs[account.provider]?.models ?? configuredModelsForProvider(account.provider);
+  return fallback.map((id) => ({
     id,
     object: "model",
     created: Number.isFinite(created) ? created : undefined,
@@ -164,15 +179,17 @@ function modelsForChain(
   chain: ChainResponse,
   accounts: ReadonlyArray<AccountResponse>,
   providerCatalogs: Record<string, ProviderModelCatalogResponse>,
+  route: "chat" | "embeddings",
 ): ReadonlyArray<ModelCardResponse> {
   const accountsById = new Map(accounts.map((account) => [account.account_id, account]));
   return mergeModels(
     chain.entries
+      .filter((entry) => (entry.route ?? "chat") === route)
       .slice()
       .sort((left, right) => left.position - right.position)
       .map((entry) => {
         const account = accountsById.get(entry.account_id);
-        return account === undefined ? [] : modelsForAccount(account, providerCatalogs);
+        return account === undefined ? [] : modelsForAccount(account, providerCatalogs, route);
       }),
   );
 }
@@ -180,6 +197,7 @@ function modelsForChain(
 function catalogForState(state: MockState, refreshed: boolean): ModelCatalogResponse {
   const accountRows = state.accounts.map((account) => {
     const models = modelsForAccount(account, state.providerCatalogs);
+    const embeddingModels = modelsForAccount(account, state.providerCatalogs, "embeddings");
     return {
       account_id: account.account_id,
       label: account.label,
@@ -188,31 +206,53 @@ function catalogForState(state: MockState, refreshed: boolean): ModelCatalogResp
       status: account.status,
       model_count: models.length,
       models,
+      embedding_model_count: embeddingModels.length,
+      embedding_models: embeddingModels,
     };
   });
   const chainRows = state.chains.map((chain) => {
-    const models = modelsForChain(chain, state.accounts, state.providerCatalogs);
+    const models = modelsForChain(chain, state.accounts, state.providerCatalogs, "chat");
+    const embeddingModels = modelsForChain(
+      chain,
+      state.accounts,
+      state.providerCatalogs,
+      "embeddings",
+    );
     return {
       chain_id: chain.chain_id,
       name: chain.name,
       model_selector: chain.model_selector ?? null,
       entry_count: chain.entries.length,
+      chat_entry_count: chain.entries.filter((entry) => (entry.route ?? "chat") === "chat")
+        .length,
+      embedding_entry_count: chain.entries.filter((entry) => entry.route === "embeddings")
+        .length,
       model_count: models.length,
       models,
+      embedding_model_count: embeddingModels.length,
+      embedding_models: embeddingModels,
+      health: "healthy",
+      issues: [],
     };
   });
   const models = mergeModels(accountRows.map((account) => account.models));
+  const embeddingModels = mergeModels(
+    accountRows.map((account) => account.embedding_models),
+  );
   return {
     generated_at: new Date().toISOString(),
     cache_ttl_seconds: 300,
     refreshed,
     model_count: models.length,
     models,
+    embedding_model_count: embeddingModels.length,
+    embedding_models: embeddingModels,
     accounts: accountRows,
     chains: chainRows,
     providers: Object.values(state.providerCatalogs).sort((left, right) =>
       left.provider.localeCompare(right.provider),
     ),
+    unhealthy_chain_count: 0,
   };
 }
 
@@ -510,11 +550,16 @@ export async function installApiMock(
     }
     if (path === "/api/chains" && method === "POST") {
       const body = readBody<CreateChainRequest>(request);
+      const positions = { chat: 0, embeddings: 0 };
       const chain: ChainResponse = {
         chain_id: nextId("chain"),
         name: body.name,
         model_selector: body.model_selector ?? null,
-        entries: body.account_ids.map((account_id, position) => ({ account_id, position })),
+        entries: body.entries.map((entry) => {
+          const routeKind = entry.route ?? "chat";
+          const position = positions[routeKind]++;
+          return { ...entry, route: routeKind, position };
+        }),
       };
       state.chains.push(chain);
       return fulfillJson(route, 201, chain);
@@ -536,13 +581,18 @@ export async function installApiMock(
           const index = state.chains.findIndex((c) => c.chain_id === id);
           if (index >= 0) {
             const existing = state.chains[index];
-            const accountIds = body.account_ids ?? existing.entries.map((e) => e.account_id);
+            const entries = body.entries ?? existing.entries;
+            const positions = { chat: 0, embeddings: 0 };
             const updated: ChainResponse = {
               chain_id: existing.chain_id,
               name: body.name ?? existing.name,
               model_selector:
                 body.model_selector !== undefined ? body.model_selector : existing.model_selector,
-              entries: accountIds.map((account_id, position) => ({ account_id, position })),
+              entries: entries.map((entry) => {
+                const routeKind = entry.route ?? "chat";
+                const position = positions[routeKind]++;
+                return { ...entry, route: routeKind, position };
+              }),
             };
             state.chains[index] = updated;
             return fulfillJson(route, 200, updated);

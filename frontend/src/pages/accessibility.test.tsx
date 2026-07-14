@@ -124,7 +124,9 @@ const chain: ChainResponse = {
   chain_id: "chain-1",
   name: "Primary failover",
   model_selector: null,
-  entries: [{ account_id: "acct-1", position: 0, model: "gpt-5.4-mini" }],
+  entries: [
+    { account_id: "acct-1", position: 0, model: "gpt-5.4-mini", route: "chat" },
+  ],
 };
 
 const traceSummary: TraceSummaryResponse = {
@@ -294,7 +296,14 @@ describe("Console modals and forms have no detectable axe violations (Requiremen
           initial={chain}
           accounts={accounts}
           accountsById={indexAccounts(accounts)}
-          modelsByAccount={new Map([["acct-1", ["gpt-5.4-mini"]]])}
+          modelsByAccount={
+            new Map([
+              [
+                "acct-1",
+                { chat: ["gpt-5.4-mini"], embeddings: ["text-embedding-3-small"] },
+              ],
+            ])
+          }
           submitting={false}
           error={null}
           onSubmit={() => {}}

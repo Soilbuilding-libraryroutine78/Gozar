@@ -6,14 +6,24 @@ from datetime import datetime, timezone
 from gozar.accounts.models import CredentialKind, CredentialStatus
 from gozar.accounts.service import AccountView
 from gozar.routing.health import assess_chain_health
+from gozar.routing.chains import RouteKind
 from gozar.routing.service import ChainEntryView, ChainView
 
 
-def _account(account_id: uuid.UUID, label: str) -> AccountView:
+def _account(
+    account_id: uuid.UUID,
+    label: str,
+    *,
+    provider: str = "openrouter",
+) -> AccountView:
     return AccountView(
         account_id=account_id,
-        provider="openrouter",
-        kind=CredentialKind.API_KEY,
+        provider=provider,
+        kind=(
+            CredentialKind.SUBSCRIPTION
+            if provider in {"codex", "anthropic"}
+            else CredentialKind.API_KEY
+        ),
         label=label,
         status=CredentialStatus.ACTIVE,
         connected_at=datetime.now(timezone.utc),
@@ -71,3 +81,59 @@ def test_chain_with_no_usable_nodes_is_broken() -> None:
 
     assert health.status == "broken"
     assert [issue.code for issue in health.issues] == ["model_unavailable"]
+
+
+def test_embedding_lane_reports_unsupported_subscription_provider() -> None:
+    account_id = uuid.uuid4()
+    chain = ChainView(
+        chain_id=uuid.uuid4(),
+        name="invalid-embedding-route",
+        client_key=None,
+        model_selector=None,
+        entries=(
+            ChainEntryView(
+                account_id,
+                0,
+                "text-embedding-3-small",
+                route_kind=RouteKind.EMBEDDINGS,
+            ),
+        ),
+    )
+
+    health = assess_chain_health(
+        chain,
+        {account_id: _account(account_id, "Codex", provider="codex")},
+        {account_id: frozenset()},
+    )
+
+    assert health.status == "broken"
+    assert health.issues[0].code == "route_unsupported"
+    assert health.issues[0].route_kind is RouteKind.EMBEDDINGS
+
+
+def test_embedding_lane_uses_its_own_discovered_model_catalog() -> None:
+    account_id = uuid.uuid4()
+    chain = ChainView(
+        chain_id=uuid.uuid4(),
+        name="rag",
+        client_key=None,
+        model_selector=None,
+        entries=(
+            ChainEntryView(
+                account_id,
+                0,
+                "text-embedding-3-small",
+                route_kind=RouteKind.EMBEDDINGS,
+            ),
+        ),
+    )
+
+    health = assess_chain_health(
+        chain,
+        {account_id: _account(account_id, "OpenAI", provider="openai")},
+        {account_id: frozenset({"gpt-5.4-mini"})},
+        {account_id: frozenset({"text-embedding-3-small"})},
+    )
+
+    assert health.status == "healthy"
+    assert health.issues == ()
